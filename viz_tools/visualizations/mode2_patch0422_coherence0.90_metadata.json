@@ -1,0 +1,22 @@
+{
+  "visualization_mode": "label_inspection",
+  "patch_idx": 422,
+  "centroid": [
+    464268.87466891535,
+    9175725.208430704,
+    2540.06626588903
+  ],
+  "n_points": 1024,
+  "n_labeled": 1024,
+  "labeled_ratio": 1.0,
+  "n_class_0": 101,
+  "n_class_1": 923,
+  "n_unlabeled": 0,
+  "coherence": 0.9013671875,
+  "majority_class": 1,
+  "color_scheme": {
+    "green": "Class 0 (No Joints)",
+    "red": "Class 1 (Joints)",
+    "gray": "Unlabeled"
+  }
+}

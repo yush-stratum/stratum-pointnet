@@ -1,0 +1,12 @@
+{
+  "visualization_mode": "batch_overview",
+  "batch_idx": 0,
+  "batch_size": 32,
+  "n_patches": 32,
+  "patch_range": [
+    0,
+    31
+  ],
+  "cloud_type": "train",
+  "n_points": 517293
+}
