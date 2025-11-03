@@ -154,12 +154,12 @@ def create_train_test_split(xyz_array, label_array, point_a, point_b):
     
     full_train_mask = full_cross_product <= 0
     full_test_mask = full_cross_product > 0
-    
-    # Only include labeled points
-    mask_where_labels_exist = label_array != -1
-    train_mask = full_train_mask & mask_where_labels_exist
-    test_mask = full_test_mask & mask_where_labels_exist
-    
+
+    # NEW 3-CLASS: Include ALL points (background, no-joint, joint)
+    # No filtering needed - all points have valid labels (0, 1, or 2)
+    train_mask = full_train_mask
+    test_mask = full_test_mask
+
     return train_mask, test_mask
 
 
@@ -239,33 +239,41 @@ def prepare_data_for_training(las_file, no_joints_dxf, joints_dxf,
             print("WARNING: RGB requested but not available in LAS file. Proceeding without RGB.")
             use_rgb = False
     
-    # Initialize labels
-    label_array = np.full(len(xyz_array), -1)
-    
+    # Initialize labels - NEW 3-CLASS SCHEME
+    # Class 0: Background (unlabeled)
+    # Class 1: No Joints
+    # Class 2: Joints
+    label_array = np.full(len(xyz_array), 0)  # Default to background (class 0)
+
     # Load and extract polygons
     print(f"\nLoading polygon annotations...")
     no_joints_doc = ezdxf.readfile(no_joints_dxf)
     joints_doc = ezdxf.readfile(joints_dxf)
-    
+
     polygons_nojoint = lines_to_polygons(no_joints_doc)
     polygons_joints = lines_to_polygons(joints_doc)
-    
+
     print(f"Found {len(polygons_nojoint)} no-joint polygons")
     print(f"Found {len(polygons_joints)} joint polygons")
-    
-    # Label points
+
+    # Label points - NEW 3-CLASS LABELING
     print(f"\nLabeling points within polygons...")
+    print(f"  Class 0: Background (unlabeled)")
+    print(f"  Class 1: No Joints")
+    print(f"  Class 2: Joints")
+
     label_array = label_points_in_polygon_2d_projection(
-        xyz_array, label_array, polygons_nojoint, label_id=0
+        xyz_array, label_array, polygons_nojoint, label_id=1  # No joints = class 1
     )
     label_array = label_points_in_polygon_2d_projection(
-        xyz_array, label_array, polygons_joints, label_id=1
+        xyz_array, label_array, polygons_joints, label_id=2  # Joints = class 2
     )
-    
-    labeled_count = np.sum(label_array != -1)
-    print(f"Labeled {labeled_count:,} points ({100*labeled_count/len(xyz_array):.2f}%)")
-    print(f"  Class 0 (No Joints): {np.sum(label_array == 0):,}")
-    print(f"  Class 1 (Joints): {np.sum(label_array == 1):,}")
+
+    # Print class distribution
+    print(f"\nClass distribution:")
+    print(f"  Class 0 (Background): {np.sum(label_array == 0):,} ({100*np.sum(label_array == 0)/len(xyz_array):.2f}%)")
+    print(f"  Class 1 (No Joints):  {np.sum(label_array == 1):,} ({100*np.sum(label_array == 1)/len(xyz_array):.2f}%)")
+    print(f"  Class 2 (Joints):     {np.sum(label_array == 2):,} ({100*np.sum(label_array == 2)/len(xyz_array):.2f}%)")
     
     # Create train/test split
     print(f"\nCreating train/test split...")
@@ -286,17 +294,22 @@ def prepare_data_for_training(las_file, no_joints_dxf, joints_dxf,
     print(f"Train: {len(train_polygons_nojoint)} no-joint, {len(train_polygons_joints)} joint polygons")
     print(f"Test: {len(test_polygons_nojoint)} no-joint, {len(test_polygons_joints)} joint polygons")
     
-    # Create polygon dictionaries
+    # Create polygon dictionaries - NEW 3-CLASS SCHEME
+    # Class 0: Background (no polygons, it's the unlabeled region)
+    # Class 1: No Joints
+    # Class 2: Joints
     polygons_dict_train = {
-        'label_0': train_polygons_nojoint,
-        'label_1': train_polygons_joints
+        'label_0': [],  # Background has no polygons
+        'label_1': train_polygons_nojoint,  # No joints
+        'label_2': train_polygons_joints    # Joints
     }
-    
+
     print("Number Test Polygons Joint",len(test_polygons_joints))
     print("Number Test Polygons NoJoint",len(test_polygons_nojoint))
     polygons_dict_test = {
-        'label_0': test_polygons_nojoint,
-        'label_1': test_polygons_joints
+        'label_0': [],  # Background has no polygons
+        'label_1': test_polygons_nojoint,  # No joints
+        'label_2': test_polygons_joints    # Joints
     }
     
     return (xyz_array, rgb_array, label_array, train_mask, test_mask,

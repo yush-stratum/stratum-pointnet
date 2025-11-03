@@ -15,10 +15,7 @@ from pointnet2_model import PointNet2Classification, PointNet2Segmentation
 from dataset import RockJointDataset
 from preprocessing_utils import prepare_data_for_training
 from train import Trainer
-
-
-# Voxel-Based Dataset Integration Guide
-from voxelize_dataset import VoxelDataset, create_train_test_voxel_datasets
+from dataset_factory import DatasetFactory
 
 def main():
     """Complete training pipeline from raw data to trained model"""
@@ -27,36 +24,53 @@ def main():
     # Configuration
     # =========================
     config = {
-        'run_name': 'test_run_rgb_voxel_2m256p',
+        'run_name': 'test_run_knn_integration',
 
         # ===== DATA PATHS =====
         'las_file': '/home/yush/local_backup_geotech/geotech_pointnet/data/w_E_p1_6cm_all.las',
         'no_joints_dxf': '/home/yush/local_backup_geotech/geotech_cv/notebooks/dxfs/29 sept/no_joints_3_oct.dxf',
         'joints_dxf': '/home/yush/local_backup_geotech/geotech_cv/notebooks/dxfs/29 sept/polygon joints 29 sept.dxf',
         'data_dir': './data/preprocessed',
-        # 'data_ckpt':'./checkpoints/preprocessed_data.npz',
-        # 'polygon_ckpt':'./checkpoints/polygons_dict.pkl',
 
         # ===== TRAIN/TEST SPLIT =====
         # Define the line that separates train/test regions
         'split_point_a': [464275, 9175697, 2546],
         'split_point_b': [464294, 9175699, 2552],
 
-        # ===== MODEL PARAMETERS =====
-        'use_rgb': True,      # Whether to use RGB features
-        'input_channels': 6,  # Will be set to 3 or 6 based on use_rgb
-        'num_classes': 2,     # Binary classification
+        # ===== DATASET CONFIGURATION =====
+        'dataset': {
+            'type': 'knn',  # Options: 'polygon', 'voxel', 'knn'
+            'params': {
+                'k_neighbors': 512,
+                'normalize_mode': 'center',
+                'augment_train': False,
+                'train_stride': 5,  # Use every 10th point for initial sampling
+                'test_stride': 3,    # Use every 3rd test point
+                'min_labeled_ratio': 0.0,
+                'cache_dir': './data/knn_cache',
+                # Label sampling for class balancing (limits samples per class)
+                # None = no limit, int = same limit for all classes
+                # dict = per-class limits: {0: 50000, 1: 100000, 2: 100000}
+                'max_samples_per_class': {
+                    0: 20000,   # Background: max 50K samples
+                    1: 1000000,  # No-Joint: max 100K samples
+                    2: 1000000   # Joint: max 100K samples
+                }
+            }
+        },
 
-        # ===== DATA PARAMETERS =====
-        'patch_size': 256,
-        'voxel_size': 2 ,
-        'normalize_mode': 'center_scale',  # Options: 'none', 'center', 'center_scale'
+        # ===== MODEL PARAMETERS =====
+        'use_rgb': False,      # Whether to use RGB features
+        'input_channels': 3,  # Will be set to 3 or 6 based on use_rgb
+        'num_classes': 3,     # 3-class: Background (0), No-Joint (1), Joint (2)
+
+        # ===== DATA PARAMETERS (Backward compatibility) =====
+        'patch_size': 1024,
+        'normalize_mode': 'center',
         'augment_train': False,
-        # 'test_min_patch_distance': 1,  # Minimum distance between test patch centers (in meters)
-        #                                   # Set to None to disable spatial subsampling
 
         # ===== TRAINING PARAMETERS =====
-        'batch_size': 16,
+        'batch_size': 796,
         'num_epochs': 50,
         'learning_rate': 0.0001,
         'weight_decay': 1e-4,
@@ -65,7 +79,7 @@ def main():
 
         # ===== CLASS BALANCING (OPTIONAL) =====
         # Set to [w0, w1] if classes are imbalanced (e.g., [1.0, 2.0])
-        'class_weights': None,
+        'class_weights': [2.053, 1.593, 0.530], #16.2/20.9/62.8
 
         # ===== SAVING =====
         'save_dir': './checkpoints',
@@ -139,9 +153,22 @@ def main():
     #         polygons_dict_train = polygons_data['train']
     #         polygons_dict_test = polygons_data['test']
 
-    #     print(f"Loaded polygon dictionaries from: {polygons_path}")
-    #     print(f"Train polygons - Class 0: {len(polygons_dict_train['label_0'])}, Class 1: {len(polygons_dict_train['label_1'])}")
-    #     print(f"Test polygons - Class 0: {len(polygons_dict_test['label_0'])}, Class 1: {len(polygons_dict_test['label_1'])}")
+        # Load polygon dictionaries (only required for 'polygon' dataset type)
+        dataset_type = config.get('dataset', {}).get('type', 'polygon')
+        if dataset_type == 'polygon':
+            import pickle
+            with open(polygons_path, 'rb') as f:
+                polygons_data = pickle.load(f)
+                polygons_dict_train = polygons_data['train']
+                polygons_dict_test = polygons_data['test']
+
+            print(f"Loaded polygon dictionaries from: {polygons_path}")
+            print(f"Train polygons - Class 0: {len(polygons_dict_train['label_0'])}, Class 1: {len(polygons_dict_train['label_1'])}")
+            print(f"Test polygons - Class 0: {len(polygons_dict_test['label_0'])}, Class 1: {len(polygons_dict_test['label_1'])}")
+        else:
+            polygons_dict_train = None
+            polygons_dict_test = None
+            print(f"Dataset type '{dataset_type}' does not require polygon dictionaries")
 
     else:
         print("\n" + "="*70)
@@ -187,6 +214,22 @@ def main():
             }, f)
         print(f"Polygon dictionaries saved to: {polygons_path}")
 
+    # Load polygon dictionaries if they exist and dataset type requires them
+    dataset_type = config.get('dataset', {}).get('type', 'polygon')
+    if dataset_type == 'polygon':
+        if not os.path.exists(polygons_path):
+            raise FileNotFoundError(f"Polygon dataset requires {polygons_path} but it doesn't exist. Run preprocessing first.")
+        import pickle
+        with open(polygons_path, 'rb') as f:
+            polygons_data = pickle.load(f)
+            polygons_dict_train = polygons_data['train']
+            polygons_dict_test = polygons_data['test']
+        print(f"\nLoaded polygon dictionaries from: {polygons_path}")
+    else:
+        polygons_dict_train = None
+        polygons_dict_test = None
+        print(f"\nDataset type '{dataset_type}' does not require polygon dictionaries")
+
     # =========================
     # Step 2: Create Datasets
     # =========================
@@ -208,44 +251,20 @@ def main():
 
     print(f"\nUsing {config['input_channels']}-channel input (XYZ{'+RGB' if config['input_channels'] == 6 else ''})")
 
-    # print("\nCreating training dataset...")
-    # train_dataset = RockJointDataset(
-    #     xyz_array=xyz_array[train_mask],
-    #     label_array=label_array[train_mask],
-    #     polygons_dict=polygons_dict_train,
-    #     patch_size=config['patch_size'],
-    #     normalize_mode=config['normalize_mode'],
-    #     augment=config['augment_train'],
-    #     rgb_array=train_rgb
-    # )
-
-    # print("\nCreating test dataset...")
-    # test_dataset = RockJointDataset(
-    #     xyz_array=xyz_array[test_mask],
-    #     label_array=label_array[test_mask],
-    #     polygons_dict=polygons_dict_test,
-    #     patch_size=config['patch_size'],
-    #     normalize_mode=config['normalize_mode'],
-    #     augment=False,
-    #     rgb_array=test_rgb,
-    #     min_patch_distance=config.get('test_min_patch_distance', None)
-    # )
-
-    # NEW CODE:
+    # Create datasets using factory
     print("\n" + "="*70)
-    print("CREATING VOXEL-BASED DATASETS")
+    print("DATASET CREATION")
     print("="*70)
 
-    train_dataset, test_dataset = create_train_test_voxel_datasets(
+    train_dataset, test_dataset = DatasetFactory.create_train_test_datasets(
+        config=config,
         xyz_array=xyz_array,
         label_array=label_array,
         train_mask=train_mask,
         test_mask=test_mask,
-        patch_size=config['patch_size'],
-        voxel_size=config.get('voxel_size', None),
-        normalize_mode=config['normalize_mode'],
-        augment_train=config['augment_train'],
-        rgb_array=rgb_array
+        rgb_array=rgb_array,
+        polygons_dict_train=polygons_dict_train,
+        polygons_dict_test=polygons_dict_test
     )
 
     # Create DataLoaders
@@ -269,6 +288,64 @@ def main():
 
     print(f"Train batches: {len(train_loader)}")
     print(f"Test batches: {len(test_loader)}")
+
+    # =========================
+    # Class Distribution Analysis
+    # =========================
+    print("\n" + "="*70)
+    print("CLASS DISTRIBUTION ANALYSIS")
+    print("="*70)
+
+    # Get labels from datasets
+    if hasattr(train_dataset, 'label_array') and hasattr(train_dataset, 'center_point_indices'):
+        # KNN dataset - get labels of center points
+        train_labels = train_dataset.label_array[train_dataset.center_point_indices]
+        test_labels = test_dataset.label_array[test_dataset.center_point_indices]
+    else:
+        # Other dataset types - would need different handling
+        print("Warning: Class distribution analysis not available for this dataset type")
+        train_labels = None
+        test_labels = None
+
+    if train_labels is not None:
+        # Count samples per class
+        unique_train = np.unique(train_labels)
+        unique_test = np.unique(test_labels)
+
+        print("\nTraining Dataset:")
+        train_total = len(train_labels)
+        for cls in sorted(unique_train):
+            count = np.sum(train_labels == cls)
+            pct = 100 * count / train_total
+            class_name = ['Background', 'No-Joint', 'Joint'][int(cls)] if cls < 3 else f'Class {cls}'
+            print(f"  {class_name} (class {cls}): {count:,} samples ({pct:.2f}%)")
+        print(f"  Total: {train_total:,} samples")
+
+        print("\nTest Dataset:")
+        test_total = len(test_labels)
+        for cls in sorted(unique_test):
+            count = np.sum(test_labels == cls)
+            pct = 100 * count / test_total
+            class_name = ['Background', 'No-Joint', 'Joint'][int(cls)] if cls < 3 else f'Class {cls}'
+            print(f"  {class_name} (class {cls}): {count:,} samples ({pct:.2f}%)")
+        print(f"  Total: {test_total:,} samples")
+
+        # Calculate class imbalance ratio
+        train_counts = [np.sum(train_labels == cls) for cls in unique_train]
+        max_count = max(train_counts)
+        min_count = min(train_counts)
+        imbalance_ratio = max_count / min_count if min_count > 0 else float('inf')
+
+        print(f"\nClass Imbalance Ratio: {imbalance_ratio:.2f}:1")
+        if imbalance_ratio > 10:
+            print("  ⚠️  SEVERE IMBALANCE - Consider using class weights or label sampling")
+            # Suggest class weights (inverse frequency)
+            weights = [train_total / (len(unique_train) * count) for count in train_counts]
+            print(f"  Suggested class_weights: {weights}")
+        elif imbalance_ratio > 3:
+            print("  ⚠️  MODERATE IMBALANCE - May benefit from class weights")
+
+    print("="*70 + "\n")
 
     # # train_dataset = RockJointDataset(...)
     # for i in range(10):

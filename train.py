@@ -106,10 +106,8 @@ class Trainer:
           outputs = outputs.view(-1, self.config['num_classes'])  # [B*N, num_classes]
           labels = labels.view(-1)  # [B*N]
 
-          # Compute loss only where labels exist
-          valid_mask = labels != -1
-          if valid_mask.sum() > 0:
-              loss = self.criterion(outputs[valid_mask], labels[valid_mask])
+          # Compute loss on all points (3-class: all points have valid labels 0, 1, 2)
+          loss = self.criterion(outputs, labels)
 
           # Backward pass
           loss.backward()
@@ -130,15 +128,12 @@ class Trainer:
         all_preds = np.array(all_preds)
         all_labels = np.array(all_labels)
 
-        # Filter out unlabeled points if any
-        if -1 in all_labels:
-            valid_mask = all_labels != -1
-            all_preds = all_preds[valid_mask]
-            all_labels = all_labels[valid_mask]
-
+        # 3-CLASS: All points have valid labels (0, 1, 2), no filtering needed
         accuracy = accuracy_score(all_labels, all_preds)
+
+        # Use macro averaging for multi-class (equal weight to each class)
         precision, recall, f1, _ = precision_recall_fscore_support(
-            all_labels, all_preds, average='binary', zero_division=0
+            all_labels, all_preds, average='macro', zero_division=0
         )
 
         return avg_loss, accuracy, precision, recall, all_labels, all_preds
@@ -189,15 +184,12 @@ class Trainer:
         all_preds = np.array(all_preds)
         all_labels = np.array(all_labels)
 
-        # Filter unlabeled points
-        if -1 in all_labels:
-            valid_mask = all_labels != -1
-            all_preds = all_preds[valid_mask]
-            all_labels = all_labels[valid_mask]
-
+        # 3-CLASS: All points have valid labels (0, 1, 2), no filtering needed
         accuracy = accuracy_score(all_labels, all_preds)
+
+        # Use macro averaging for multi-class (equal weight to each class)
         precision, recall, f1, _ = precision_recall_fscore_support(
-            all_labels, all_preds, average='binary', zero_division=0
+            all_labels, all_preds, average='macro', zero_division=0
         )
 
         return avg_loss, accuracy, precision, recall, f1, all_labels, all_preds
@@ -215,6 +207,11 @@ class Trainer:
         for epoch in range(1, self.config['num_epochs'] + 1):
             print(f"\nEpoch {epoch}/{self.config['num_epochs']}")
             print("-" * 50)
+
+            # Resample training data each epoch (if label sampling is enabled)
+            # This uses cached KNN indices - no recomputation needed
+            if hasattr(self.train_loader.dataset, 'resample_active_indices'):
+                self.train_loader.dataset.resample_active_indices(epoch)
 
             # Train
             train_loss, train_acc, train_precision, train_recall, train_labels, train_preds = self.train_epoch(epoch)
@@ -247,6 +244,11 @@ class Trainer:
                     self.save_dir,
                     f"best_model_acc{test_acc:.4f}.pth"
                 )
+                # Get voxel_size if available (for voxel dataset)
+                voxel_size = None
+                if hasattr(self.train_loader.dataset, 'get_voxel_size'):
+                    voxel_size = self.train_loader.dataset.get_voxel_size()
+
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
@@ -254,7 +256,7 @@ class Trainer:
                     'test_acc': test_acc,
                     'test_precision': test_precision,
                     'test_recall': test_recall,
-                    'voxel_size': self.train_loader.dataset.get_voxel_size(),
+                    'voxel_size': voxel_size,
                     'config': self.config
                 }, self.best_model_path)
                 print(f"  Saved best model: {self.best_model_path}")
@@ -265,11 +267,17 @@ class Trainer:
                     self.save_dir,
                     f"checkpoint_epoch{epoch}.pth"
                 )
+
+                # Get voxel_size if available (for voxel dataset)
+                voxel_size = None
+                if hasattr(self.train_loader.dataset, 'get_voxel_size'):
+                    voxel_size = self.train_loader.dataset.get_voxel_size()
+
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
-                    'voxel_size': self.train_loader.dataset.get_voxel_size(),
+                    'voxel_size': voxel_size,
                     'train_losses': self.train_losses,
                     'test_losses': self.test_losses,
                     'train_accs': self.train_accs,
@@ -308,10 +316,19 @@ class Trainer:
         """Plot and save a confusion matrix"""
         cm = confusion_matrix(labels, preds)
 
-        plt.figure(figsize=(8, 6))
+        # Determine class labels based on number of classes
+        num_classes = self.config['num_classes']
+        if num_classes == 2:
+            class_labels = ['No Joint', 'Joint']
+        elif num_classes == 3:
+            class_labels = ['Background', 'No Joint', 'Joint']
+        else:
+            class_labels = [f'Class {i}' for i in range(num_classes)]
+
+        plt.figure(figsize=(10, 8))
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                    xticklabels=['No Joint', 'Joint'],
-                    yticklabels=['No Joint', 'Joint'])
+                    xticklabels=class_labels,
+                    yticklabels=class_labels)
         plt.xlabel('Predicted', fontsize=12)
         plt.ylabel('True', fontsize=12)
         plt.title(title, fontsize=14, fontweight='bold')
@@ -334,19 +351,19 @@ class Trainer:
             test_labels, test_preds, average=None, zero_division=0
         )
 
-        report = {
-            'class_0': {
-                'precision': float(precision[0]),
-                'recall': float(recall[0]),
-                'f1': float(f1[0])
-            },
-            'class_1': {
-                'precision': float(precision[1]),
-                'recall': float(recall[1]),
-                'f1': float(f1[1])
-            },
-            'overall_accuracy': float(self.best_test_acc)
-        }
+        # Build report dynamically based on number of classes
+        num_classes = self.config['num_classes']
+        class_names = ['background', 'no_joint', 'joint'] if num_classes == 3 else [f'class_{i}' for i in range(num_classes)]
+
+        report = {}
+        for i in range(num_classes):
+            if i < len(precision):  # Check if class exists in predictions
+                report[class_names[i]] = {
+                    'precision': float(precision[i]),
+                    'recall': float(recall[i]),
+                    'f1': float(f1[i])
+                }
+        report['overall_accuracy'] = float(self.best_test_acc)
 
         report_path = os.path.join(self.save_dir, 'classification_report.json')
         with open(report_path, 'w') as f:

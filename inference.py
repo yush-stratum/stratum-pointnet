@@ -13,8 +13,7 @@ from collections import defaultdict
 
 from pointnet2_model import PointNet2Segmentation
 from dataset import RockJointInferenceDataset
-
-from voxelize_dataset import VoxelDataset
+from dataset_factory import DatasetFactory
 
 class PointCloudInference:
     """
@@ -112,27 +111,32 @@ class PointCloudInference:
     #     return predictions, probabilities
 
 
-    def predict_point_cloud(self, xyz_array, rgb_array=None, batch_size=16):
-        """Updated inference with proper point mapping"""
+    def predict_point_cloud(self, xyz_array, rgb_array=None, label_array=None, batch_size=16):
+        """Updated inference with proper point mapping and dataset factory support"""
 
-        # Create inference dataset
-        inference_dataset = VoxelDataset(
+        # Create inference dataset using factory
+        inference_dataset = DatasetFactory.create_inference_dataset(
+            config=self.config,
             xyz_array=xyz_array,
-            label_array=None,
             rgb_array=rgb_array,
-            patch_size=self.config['patch_size'],
-            voxel_size=self.config.get('voxel_size', None),
-            normalize_mode=self.config['normalize_mode'],
-            augment=False
+            label_array=label_array
         )
+
+        # Check dataset type to determine return format
+        dataset_type = self.config.get('dataset', {}).get('type', 'polygon')
 
         # Modify dataloader to use custom collate function
         def collate_with_indices(batch):
             """Collate function that preserves indices"""
             points = torch.stack([item[0] for item in batch])
             labels = torch.stack([item[1] for item in batch])
-            indices = [item[2] for item in batch]  # List of index tensors
-            return points, labels, indices
+
+            # Handle both 2-tuple and 3-tuple returns
+            if len(batch[0]) == 3:
+                indices = [item[2] for item in batch]  # List of index tensors
+                return points, labels, indices
+            else:
+                return points, labels, None
 
         inference_loader = DataLoader(
             inference_dataset,
@@ -148,10 +152,11 @@ class PointCloudInference:
         probabilities = np.zeros((len(xyz_array), self.config['num_classes']))
         vote_counts = np.zeros(len(xyz_array), dtype=np.int32)
 
-        print(f"\nRunning inference on {len(inference_dataset)} voxels...")
+        print(f"\nRunning inference on {len(inference_dataset)} patches...")
 
         with torch.no_grad():
-            for points, _, batch_indices in tqdm(inference_loader, desc="Inference"):
+            for batch_data in tqdm(inference_loader, desc="Inference"):
+                points, _, batch_indices = batch_data
                 points = points.to(self.device)  # [B, N, C]
 
                 outputs = self.model(points)  # [B, num_classes, N]
@@ -162,17 +167,22 @@ class PointCloudInference:
                 preds_np = preds.cpu().numpy()  # [B, N]
                 probs_np = probs.cpu().numpy()  # [B, num_classes, N]
 
-                # Assign predictions using original point indices
-                for b in range(len(batch_indices)):
-                    point_indices = batch_indices[b].numpy()  # [patch_size]
-                    point_preds = preds_np[b]  # [patch_size]
-                    point_probs = probs_np[b].T  # [patch_size, num_classes]
+                # Handle different dataset types
+                if batch_indices is not None and dataset_type in ['knn', 'voxel']:
+                    # Direct point-to-prediction mapping (KNN, voxel)
+                    for b in range(len(batch_indices)):
+                        point_indices = batch_indices[b].numpy() if hasattr(batch_indices[b], 'numpy') else batch_indices[b]
+                        point_preds = preds_np[b]  # [patch_size]
+                        point_probs = probs_np[b].T  # [patch_size, num_classes]
 
-                    # Accumulate predictions (averaging if points appear in multiple voxels)
-                    for i, pt_idx in enumerate(point_indices):
-                        predictions[pt_idx] = point_preds[i]
-                        probabilities[pt_idx] += point_probs[i]
-                        vote_counts[pt_idx] += 1
+                        # Accumulate predictions (averaging if points appear in multiple patches)
+                        for i, pt_idx in enumerate(point_indices):
+                            predictions[pt_idx] = point_preds[i]
+                            probabilities[pt_idx] += point_probs[i]
+                            vote_counts[pt_idx] += 1
+                else:
+                    # For polygon dataset, would need spatial aggregation (not implemented here)
+                    raise NotImplementedError(f"Inference aggregation for {dataset_type} dataset not yet implemented")
 
         # Average probabilities where points were seen
         mask = vote_counts > 0
@@ -313,23 +323,33 @@ def main():
     # =========================
     config = {
         # Model path
-        'model_path': '/home/yush/local_backup_geotech/geotech_pointnet/checkpoints/test_run_rgb_voxel_2m256p/best_model_acc0.8158.pth',  # Update with your best model
+        'model_path': './checkpoints/test_run_knn_integration/best_model_acc0.7615.pth',
 
         # Input/Output
         'input_las': '/home/yush/local_backup_geotech/geotech_pointnet/data/w_E_p1_6cm_all.las',
-        'output_las': './predictions/w_E_p1_6cm_all_predicted_fix_xyz_voxel.las',
+        'output_las': './predictions/w_E_p1_6cm_all_predicted_knn_1024.las',
         "data_ckpt": "./data/preprocessed/preprocessed_data.npz",
 
+        # Dataset configuration
+        'dataset': {
+            'type': 'knn',  # Must match training
+            'params': {
+                'k_neighbors': 1024,
+                'normalize_mode': 'center',
+                'inference_stride': 5,  # Use every 100th point for faster inference
+                'cache_dir': './data/knn_cache'
+            }
+        },
+
         # Model parameters (must match training)
-        'num_classes': 2,
-        'use_rgb': False,       # Whether to use RGB features (must match training)
+        'num_classes': 3,      # 3-class: Background (0), No-Joint (1), Joint (2)
+        'use_rgb': False,      # Whether to use RGB features (must match training)
         'input_channels': 3,   # Will be set to 3 or 6 based on use_rgb
 
-        # Inference parameters
-        'patch_size': 256,
-        'stride': 32,
-        'normalize_mode': 'center_scale',  # Must match training
-        'batch_size': 16,
+        # Inference parameters (backward compatibility)
+        'patch_size': 1024,
+        'normalize_mode': 'center',
+        'batch_size': 1024,
     }
 
     # Create output directory
