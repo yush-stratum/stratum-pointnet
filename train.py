@@ -136,7 +136,12 @@ class Trainer:
             all_labels, all_preds, average='macro', zero_division=0
         )
 
-        return avg_loss, accuracy, precision, recall, all_labels, all_preds
+        # Compute per-class metrics
+        per_class_precision, per_class_recall, per_class_f1, _ = precision_recall_fscore_support(
+            all_labels, all_preds, average=None, zero_division=0
+        )
+
+        return avg_loss, accuracy, precision, recall, all_labels, all_preds, per_class_precision, per_class_recall, per_class_f1
 
     def test_epoch(self, epoch):
         """Test for one epoch"""
@@ -192,7 +197,12 @@ class Trainer:
             all_labels, all_preds, average='macro', zero_division=0
         )
 
-        return avg_loss, accuracy, precision, recall, f1, all_labels, all_preds
+        # Compute per-class metrics
+        per_class_precision, per_class_recall, per_class_f1, _ = precision_recall_fscore_support(
+            all_labels, all_preds, average=None, zero_division=0
+        )
+
+        return avg_loss, accuracy, precision, recall, f1, all_labels, all_preds, per_class_precision, per_class_recall, per_class_f1
 
     def train(self):
         """Main training loop"""
@@ -214,14 +224,18 @@ class Trainer:
                 self.train_loader.dataset.resample_active_indices(epoch)
 
             # Train
-            train_loss, train_acc, train_precision, train_recall, train_labels, train_preds = self.train_epoch(epoch)
+            train_results = self.train_epoch(epoch)
+            train_loss, train_acc, train_precision, train_recall, train_labels, train_preds, \
+            train_per_class_precision, train_per_class_recall, train_per_class_f1 = train_results
             self.train_losses.append(train_loss)
             self.train_accs.append(train_acc)
             self.train_precisions.append(train_precision)
             self.train_recalls.append(train_recall)
 
             # Test
-            test_loss, test_acc, test_precision, test_recall, f1, test_labels, test_preds = self.test_epoch(epoch)
+            test_results = self.test_epoch(epoch)
+            test_loss, test_acc, test_precision, test_recall, f1, test_labels, test_preds, \
+            test_per_class_precision, test_per_class_recall, test_per_class_f1 = test_results
             self.test_losses.append(test_loss)
             self.test_accs.append(test_acc)
             self.test_precisions.append(test_precision)
@@ -230,12 +244,41 @@ class Trainer:
             # Update learning rate
             self.scheduler.step()
 
-            # Print metrics
-            print(f"\nResults:")
+            # Print macro-averaged metrics
+            print(f"\n{'='*70}")
+            print(f"EPOCH {epoch} RESULTS (Macro-Averaged)")
+            print(f"{'='*70}")
             print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
                   f"Precision: {train_precision:.4f} | Recall: {train_recall:.4f}")
             print(f"  Test Loss:  {test_loss:.4f} | Test Acc:  {test_acc:.4f} | "
                   f"Precision: {test_precision:.4f} | Recall: {test_recall:.4f} | F1: {f1:.4f}")
+
+            # Print per-class metrics for both train and test
+            class_names = ['Background', 'No-Joint', 'Joint']
+
+            # Training set per-class metrics
+            print(f"\n{'='*70}")
+            print(f"PER-CLASS METRICS (Training Set)")
+            print(f"{'='*70}")
+            print(f"{'Class':<15} {'Precision':<12} {'Recall':<12} {'F1-Score':<12}")
+            print(f"{'-'*70}")
+            for i, class_name in enumerate(class_names):
+                if i < len(train_per_class_precision):
+                    print(f"{class_name:<15} {train_per_class_precision[i]:<12.4f} "
+                          f"{train_per_class_recall[i]:<12.4f} {train_per_class_f1[i]:<12.4f}")
+            print(f"{'='*70}")
+
+            # Test set per-class metrics
+            print(f"\n{'='*70}")
+            print(f"PER-CLASS METRICS (Test Set)")
+            print(f"{'='*70}")
+            print(f"{'Class':<15} {'Precision':<12} {'Recall':<12} {'F1-Score':<12}")
+            print(f"{'-'*70}")
+            for i, class_name in enumerate(class_names):
+                if i < len(test_per_class_precision):
+                    print(f"{class_name:<15} {test_per_class_precision[i]:<12.4f} "
+                          f"{test_per_class_recall[i]:<12.4f} {test_per_class_f1[i]:<12.4f}")
+            print(f"{'='*70}")
 
             # Save best model
             if test_acc > self.best_test_acc:

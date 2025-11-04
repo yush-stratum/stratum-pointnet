@@ -35,13 +35,15 @@ def farthest_point_sample(xyz, npoint):
     """
     Farthest Point Sampling
     Input:
-        xyz: pointcloud data, [B, N, 3]
+        xyz: pointcloud data, [B, N, 3] (MUST be exactly 3 channels - XYZ only)
         npoint: number of samples
     Return:
         centroids: sampled pointcloud index, [B, npoint]
     """
     device = xyz.device
     B, N, C = xyz.shape
+    assert C == 3, f"FPS expects exactly 3 channels (XYZ), got {C}"
+
     centroids = torch.zeros(B, npoint, dtype=torch.long).to(device)
     distance = torch.ones(B, N).to(device) * 1e10
     farthest = torch.randint(0, N, (B,), dtype=torch.long).to(device)
@@ -311,6 +313,10 @@ class PointNet2Segmentation(nn.Module):
       self.input_channels = input_channels
 
       # Set Abstraction layers - ADJUSTED FOR 1024 POINTS
+      # First layer: in_channel = 3 (normalized XYZ) + (input_channels - 3) additional features
+      # If input_channels=3, then in_channel=3 (just XYZ)
+      # If input_channels=6, then in_channel=3+3=6 (XYZ + RGB)
+      # If input_channels=7, then in_channel=3+4=7 (XYZ + 4 features)
       self.sa1 = PointNetSetAbstraction(
           npoint=512, radius=0.2, nsample=32,
           in_channel=input_channels, mlp=[32, 32, 64], group_all=False
@@ -346,15 +352,22 @@ class PointNet2Segmentation(nn.Module):
     def forward(self, xyz):
         """
         Input:
-            xyz: input points position data, [B, N, C]
+            xyz: input points data, [B, N, C] where C >= 3
+                 First 3 channels are XYZ coordinates
+                 Remaining channels (if any) are additional features (RGB, geometric features, etc.)
         Return:
             x: per-point class scores, [B, num_classes, N]
         """
         B, N, C = xyz.shape
         xyz = xyz.permute(0, 2, 1)  # [B, C, N]
 
-        l0_xyz = xyz
-        l0_points = None
+        # Separate XYZ coordinates from additional features
+        l0_xyz = xyz[:, :3, :]  # [B, 3, N] - always first 3 channels
+        if C > 3:
+            # Additional features (RGB, normals, curvature, etc.)
+            l0_points = xyz[:, 3:, :]  # [B, C-3, N]
+        else:
+            l0_points = None
 
         l1_xyz, l1_points = self.sa1(l0_xyz, l0_points)
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)

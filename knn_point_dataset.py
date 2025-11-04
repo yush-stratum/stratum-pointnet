@@ -17,6 +17,7 @@ from scipy.spatial import KDTree
 from tqdm import tqdm
 import pickle
 import os
+from typing import Optional, List, Dict
 
 
 class KNNPointDataset(Dataset):
@@ -34,7 +35,10 @@ class KNNPointDataset(Dataset):
     def __init__(self, xyz_array, label_array=None,
                  k_neighbors=1024, normalize_mode='center', augment=False,
                  rgb_array=None, cache_path=None, point_indices=None,
-                 stride=1, min_labeled_ratio=0.0, max_samples_per_class=None):
+                 stride=1, min_labeled_ratio=0.0, max_samples_per_class=None,
+                 feature_names: Optional[List[str]] = None,
+                 feature_k_neighbors: int = 30,
+                 feature_cache_dir: str = './data/feature_cache'):
         """
         Args:
             xyz_array: Full point cloud coordinates [N, 3]
@@ -52,6 +56,11 @@ class KNNPointDataset(Dataset):
             max_samples_per_class: Maximum number of center points per class (for label balancing)
                                   None = use all points (after stride)
                                   Dict or int: e.g., {0: 50000, 1: 100000, 2: 100000} or 100000
+            feature_names: List of geometric features to compute and include
+                          Options: 'normals', 'curvature', 'roughness', 'linearity', 'planarity', 'sphericity'
+                          None = use only XYZ (and RGB if available)
+            feature_k_neighbors: Number of neighbors for feature computation (default: 30)
+            feature_cache_dir: Directory to cache computed features
         """
         self.xyz_array = xyz_array
         self.label_array = label_array if label_array is not None else np.full(len(xyz_array), -1)
@@ -63,6 +72,12 @@ class KNNPointDataset(Dataset):
         self.stride = stride
         self.min_labeled_ratio = min_labeled_ratio
         self.max_samples_per_class = max_samples_per_class
+
+        # Feature computation
+        self.feature_names = feature_names
+        self.feature_k_neighbors = feature_k_neighbors
+        self.feature_cache_dir = feature_cache_dir
+        self.features = None  # Will store computed features if requested
 
         print(f"\n{'='*70}")
         print("Creating KNN Point Dataset")
@@ -111,7 +126,29 @@ class KNNPointDataset(Dataset):
         if min_labeled_ratio > 0 and not np.all(self.label_array == -1):
             self._filter_by_labeled_ratio()
 
-        feature_dim = 6 if self.use_rgb else 3
+        # Compute geometric features if requested
+        if feature_names is not None and len(feature_names) > 0:
+            from feature_factory import FeatureFactory
+            print(f"\nRequested features: {feature_names}")
+            self.features = FeatureFactory.get_features(
+                xyz_array=self.xyz_array,
+                feature_names=feature_names,
+                k_neighbors=feature_k_neighbors,
+                cache_dir=feature_cache_dir
+            )
+            print(f"Features loaded/computed successfully ✅")
+
+            # Calculate total feature dimension
+            feature_dim = 3  # XYZ
+            if self.use_rgb:
+                feature_dim += 3  # RGB
+            for name in feature_names:
+                if name == 'normals':
+                    feature_dim += 3
+                else:
+                    feature_dim += 1  # scalar features
+        else:
+            feature_dim = 6 if self.use_rgb else 3
         print(f"\nKNNPointDataset created:")
         print(f"  Samples (center points): {len(self.center_point_indices):,}")
         print(f"  Feature dimension: {feature_dim}")
@@ -317,17 +354,28 @@ class KNNPointDataset(Dataset):
         neighbor_points = self.xyz_array[neighbor_indices].copy()
         neighbor_labels = self.label_array[neighbor_indices].copy()
 
-        if self.use_rgb:
-            neighbor_rgb = self.rgb_array[neighbor_indices].copy()
-
         # Get center point coordinates (for normalization reference)
         center_point = self.xyz_array[center_idx]
 
-        # Concatenate XYZ and RGB if using RGB
+        # Build feature vector: Start with XYZ
+        feature_list = [neighbor_points]  # [K, 3]
+
+        # Add RGB if available
         if self.use_rgb:
-            neighbor_features = np.hstack([neighbor_points, neighbor_rgb])  # [K, 6]
-        else:
-            neighbor_features = neighbor_points  # [K, 3]
+            neighbor_rgb = self.rgb_array[neighbor_indices].copy()
+            feature_list.append(neighbor_rgb)  # [K, 3]
+
+        # Add geometric features if requested
+        if self.features is not None:
+            for feature_name in self.feature_names:
+                feature_data = self.features[feature_name][neighbor_indices].copy()
+                # Ensure 2D shape: [K, D] where D=3 for normals, D=1 for scalars
+                if feature_data.ndim == 1:
+                    feature_data = feature_data[:, np.newaxis]  # [K, 1]
+                feature_list.append(feature_data)
+
+        # Concatenate all features
+        neighbor_features = np.hstack(feature_list)  # [K, total_dim]
 
         # Normalize relative to center point
         neighbor_features = self._normalize(neighbor_features, center_point)
@@ -345,18 +393,19 @@ class KNNPointDataset(Dataset):
     def _normalize(self, points, center_point):
         """
         Apply normalization relative to center point
-        Note: Only normalizes XYZ coordinates, RGB remains in [0, 1]
+        Note: Only normalizes XYZ coordinates (first 3 columns)
+              RGB and geometric features remain unchanged
         """
         if self.normalize_mode == 'none':
             return points
 
-        # Separate XYZ and RGB if using RGB
-        if self.use_rgb:
-            xyz = points[:, :3]
-            rgb = points[:, 3:]
-        else:
-            xyz = points
+        # Always extract XYZ (first 3 columns)
+        xyz = points[:, :3]
 
+        # Everything else (RGB + geometric features) stays unchanged
+        other_features = points[:, 3:] if points.shape[1] > 3 else None
+
+        # Normalize XYZ
         if self.normalize_mode == 'center':
             # Center on the query point (relative coordinates)
             xyz = xyz - center_point
@@ -371,25 +420,25 @@ class KNNPointDataset(Dataset):
         else:
             raise ValueError(f"Unknown normalize_mode: {self.normalize_mode}")
 
-        # Concatenate back if using RGB
-        if self.use_rgb:
-            return np.hstack([xyz, rgb])
+        # Concatenate back: XYZ + [RGB] + [geometric features]
+        if other_features is not None:
+            return np.hstack([xyz, other_features])
         else:
             return xyz
 
     def _augment(self, points):
         """
         Data augmentation: random rotation, scaling, jittering
-        Note: Only augments XYZ coordinates, RGB remains unchanged
+        Note: Only augments XYZ coordinates (first 3 columns)
+              RGB and geometric features remain unchanged
 
         WARNING: This breaks determinism! Only use during training.
         """
-        # Separate XYZ and RGB if using RGB
-        if self.use_rgb:
-            xyz = points[:, :3]
-            rgb = points[:, 3:]
-        else:
-            xyz = points
+        # Always extract XYZ (first 3 columns)
+        xyz = points[:, :3]
+
+        # Everything else (RGB + geometric features) stays unchanged
+        other_features = points[:, 3:] if points.shape[1] > 3 else None
 
         # Random rotation around Z-axis (vertical)
         theta = np.random.uniform(0, 2 * np.pi)
@@ -408,9 +457,9 @@ class KNNPointDataset(Dataset):
         jitter = np.random.normal(0, 0.01, size=xyz.shape)
         xyz = xyz + jitter
 
-        # Concatenate back if using RGB
-        if self.use_rgb:
-            return np.hstack([xyz, rgb])
+        # Concatenate back: XYZ + [RGB] + [geometric features]
+        if other_features is not None:
+            return np.hstack([xyz, other_features])
         else:
             return xyz
 
@@ -526,7 +575,10 @@ def create_train_test_knn_datasets(xyz_array, label_array, train_mask, test_mask
                                    train_stride=1, test_stride=1,
                                    min_labeled_ratio=0.0,
                                    cache_dir='./data/knn_cache',
-                                   max_samples_per_class=None):
+                                   max_samples_per_class=None,
+                                   feature_names: Optional[List[str]] = None,
+                                   feature_k_neighbors: int = 30,
+                                   feature_cache_dir: str = './data/feature_cache'):
     """
     Create training and test KNN datasets
 
@@ -545,6 +597,10 @@ def create_train_test_knn_datasets(xyz_array, label_array, train_mask, test_mask
         cache_dir: Directory to save/load KNN caches
         max_samples_per_class: Maximum training samples per class (for label balancing)
                               None, int, or dict: {0: 50000, 1: 100000, 2: 100000}
+        feature_names: List of geometric features to compute
+                      Options: 'normals', 'curvature', 'roughness', 'linearity', 'planarity', 'sphericity'
+        feature_k_neighbors: Number of neighbors for feature computation
+        feature_cache_dir: Directory to cache computed features
 
     Returns:
         train_dataset, test_dataset
@@ -566,7 +622,10 @@ def create_train_test_knn_datasets(xyz_array, label_array, train_mask, test_mask
         cache_path=train_cache,
         stride=train_stride,
         min_labeled_ratio=min_labeled_ratio,
-        max_samples_per_class=max_samples_per_class  # Label sampling for training only
+        max_samples_per_class=max_samples_per_class,  # Label sampling for training only
+        feature_names=feature_names,
+        feature_k_neighbors=feature_k_neighbors,
+        feature_cache_dir=feature_cache_dir
     )
 
     print("\n" + "="*70)
@@ -583,7 +642,10 @@ def create_train_test_knn_datasets(xyz_array, label_array, train_mask, test_mask
         rgb_array=rgb_array[test_mask] if rgb_array is not None else None,
         cache_path=test_cache,
         stride=test_stride,
-        min_labeled_ratio=0.0  # Don't filter test set
+        min_labeled_ratio=0.0,  # Don't filter test set
+        feature_names=feature_names,
+        feature_k_neighbors=feature_k_neighbors,
+        feature_cache_dir=feature_cache_dir
     )
 
     print("\n" + "="*70)

@@ -17,6 +17,46 @@ from preprocessing_utils import prepare_data_for_training
 from train import Trainer
 from dataset_factory import DatasetFactory
 
+
+def calculate_input_channels(config):
+    """
+    Calculate the total number of input channels based on configuration.
+
+    Args:
+        config: Configuration dictionary
+
+    Returns:
+        int: Total number of input channels
+
+    Breakdown:
+        - XYZ: 3 channels (always)
+        - RGB: 3 channels (if use_rgb=True)
+        - Geometric features: variable (based on feature_names)
+          - normals: 3 channels
+          - curvature, roughness, linearity, planarity, sphericity: 1 channel each
+    """
+    # Start with XYZ (always 3)
+    total_channels = 3
+
+    # Add RGB if enabled
+    if config.get('use_rgb', False):
+        total_channels += 3
+
+    # Add geometric features if configured
+    dataset_params = config.get('dataset', {}).get('params', {})
+    feature_names = dataset_params.get('feature_names', None)
+
+    if feature_names is not None and len(feature_names) > 0:
+        for feature_name in feature_names:
+            if feature_name == 'normals':
+                total_channels += 3
+            else:
+                # Scalar features
+                total_channels += 1
+
+    return total_channels
+
+
 def main():
     """Complete training pipeline from raw data to trained model"""
 
@@ -24,12 +64,13 @@ def main():
     # Configuration
     # =========================
     config = {
-        'run_name': 'test_run_knn_integration',
+        'run_name': 'test_run_knn_normals_rgb',
 
         # ===== DATA PATHS =====
         'las_file': '/home/yush/local_backup_geotech/geotech_pointnet/data/w_E_p1_6cm_all.las',
         'no_joints_dxf': '/home/yush/local_backup_geotech/geotech_cv/notebooks/dxfs/29 sept/no_joints_3_oct.dxf',
         'joints_dxf': '/home/yush/local_backup_geotech/geotech_cv/notebooks/dxfs/29 sept/polygon joints 29 sept.dxf',
+        'rgb_array': '/home/yush/local_backup_geotech/geotech_pointnet/data/rgb_array.npy',
         'data_dir': './data/preprocessed',
 
         # ===== TRAIN/TEST SPLIT =====
@@ -48,6 +89,10 @@ def main():
                 'test_stride': 3,    # Use every 3rd test point
                 'min_labeled_ratio': 0.0,
                 'cache_dir': './data/knn_cache',
+                'feature_names': ['normals', 'curvature'],
+                'feature_k_neighbors': 30,
+                'feature_cache_dir': './data/feature_cache',
+
                 # Label sampling for class balancing (limits samples per class)
                 # None = no limit, int = same limit for all classes
                 # dict = per-class limits: {0: 50000, 1: 100000, 2: 100000}
@@ -59,9 +104,9 @@ def main():
             }
         },
 
-        # ===== MODEL PARAMETERS =====
+        # ===== MODEL PARAMETERS 1=====
         'use_rgb': False,      # Whether to use RGB features
-        'input_channels': 3,  # Will be set to 3 or 6 based on use_rgb
+        'input_channels': 7,  # Will be set to 3 or 6 based on use_rgb
         'num_classes': 3,     # 3-class: Background (0), No-Joint (1), Joint (2)
 
         # ===== DATA PARAMETERS (Backward compatibility) =====
@@ -79,7 +124,7 @@ def main():
 
         # ===== CLASS BALANCING (OPTIONAL) =====
         # Set to [w0, w1] if classes are imbalanced (e.g., [1.0, 2.0])
-        'class_weights': [2.053, 1.593, 0.530], #16.2/20.9/62.8
+        'class_weights': [1, 3, 2], #16.2/20.9/62.8
 
         # ===== SAVING =====
         'save_dir': './checkpoints',
@@ -378,15 +423,43 @@ def main():
     #     print(f"\n  ⚠ Classes are imbalanced! Consider using class_weights: {suggested_weights}")
 
     # =========================
-    # Step 3: Create Model
+    # Step 3: Calculate Input Channels & Create Model
     # =========================
     print("\n" + "="*70)
-    print("STEP 3: INITIALIZING MODEL")
+    print("STEP 3: CALCULATING INPUT CHANNELS & INITIALIZING MODEL")
     print("="*70)
+
+    # Calculate actual input channels based on dataset configuration
+    actual_input_channels = calculate_input_channels(config)
+
+    # Print breakdown
+    print(f"\nCalculating input channels:")
+    print(f"  - XYZ: 3 channels")
+    if config.get('use_rgb', False):
+        print(f"  - RGB: 3 channels")
+
+    feature_names = config['dataset']['params'].get('feature_names', None)
+    if feature_names is not None and len(feature_names) > 0:
+        print(f"  - Geometric features:")
+        for feature_name in feature_names:
+            if feature_name == 'normals':
+                print(f"    • normals: 3 channels")
+            else:
+                print(f"    • {feature_name}: 1 channel")
+
+    print(f"\n  Total input channels: {actual_input_channels}")
+
+    # Check if manual value matches calculated value
+    if config.get('input_channels') is not None and config['input_channels'] != actual_input_channels:
+        print(f"  ⚠️  WARNING: Config has input_channels={config['input_channels']}, but calculated {actual_input_channels}")
+        print(f"  ⚠️  Using calculated value: {actual_input_channels}")
+
+    # Override config with calculated value
+    config['input_channels'] = actual_input_channels
 
     model = PointNet2Segmentation(
         num_classes=config['num_classes'],
-        input_channels=config['input_channels']
+        input_channels=actual_input_channels
     )
 
     # Count parameters
@@ -395,8 +468,8 @@ def main():
     print(f"\nModel: PointNet2Segmentation")
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
-    print(f"Input: [{config['batch_size']}, {config['patch_size']}, {config['input_channels']}]")
-    print(f"Output: [{config['batch_size']}, {config['num_classes']}]")
+    print(f"Input shape: [B={config['batch_size']}, N={config['dataset']['params']['k_neighbors']}, C={actual_input_channels}]")
+    print(f"Output shape: [B={config['batch_size']}, num_classes={config['num_classes']}, N={config['dataset']['params']['k_neighbors']}]")
 
     # =========================
     # Step 4: Train
