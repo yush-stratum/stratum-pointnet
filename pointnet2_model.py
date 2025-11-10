@@ -318,19 +318,19 @@ class PointNet2Segmentation(nn.Module):
       # If input_channels=6, then in_channel=3+3=6 (XYZ + RGB)
       # If input_channels=7, then in_channel=3+4=7 (XYZ + 4 features)
       self.sa1 = PointNetSetAbstraction(
-          npoint=512, radius=0.2, nsample=32,
+          npoint=512, radius=0.1, nsample=32,
           in_channel=input_channels, mlp=[32, 32, 64], group_all=False
       )
       self.sa2 = PointNetSetAbstraction(
-          npoint=128, radius=0.4, nsample=32,  # 512 -> 128, nsample=32
+          npoint=128, radius=0.2, nsample=64,  # 512 -> 128, nsample=32
           in_channel=64 + 3, mlp=[64, 64, 128], group_all=False
       )
       self.sa3 = PointNetSetAbstraction(
-          npoint=32, radius=0.8, nsample=32,  # 128 -> 32, nsample=32
+          npoint=64, radius=0.5, nsample=32,  # 128 -> 32, nsample=32
           in_channel=128 + 3, mlp=[128, 128, 256], group_all=False
       )
       self.sa4 = PointNetSetAbstraction(
-          npoint=8, radius=1.6, nsample=16,  # 32 -> 8, nsample=16 (can't query 256 from 32!)
+          npoint=32, radius=1, nsample=16,  # 32 -> 8, nsample=16 (can't query 256 from 32!)
           in_channel=256 + 3, mlp=[256, 256, 512], group_all=False
       )
 
@@ -338,15 +338,15 @@ class PointNet2Segmentation(nn.Module):
       self.fp4 = PointNetFeaturePropagation(in_channel=768, mlp=[256, 256])
       self.fp3 = PointNetFeaturePropagation(in_channel=384, mlp=[256, 256])
       self.fp2 = PointNetFeaturePropagation(in_channel=320, mlp=[256, 128])
-      print(f"DEBUG INPUT CHANNELS: {input_channels}")
+      # print(f"DEBUG INPUT CHANNELS: {input_channels}")
       self.fp1 = PointNetFeaturePropagation(in_channel=128,
       mlp=[128, 128, 128])
-      print("DEBUG INPUT CHANNELS:",self.fp1)
+      # print("DEBUG INPUT CHANNELS:",self.fp1)
 
       # Segmentation head (no changes needed)
       self.conv1 = nn.Conv1d(128, 128, 1)
       self.bn1 = nn.BatchNorm1d(128)
-      self.drop1 = nn.Dropout(0.5)
+      self.drop1 = nn.Dropout(0.3)
       self.conv2 = nn.Conv1d(128, num_classes, 1)
 
     def forward(self, xyz):

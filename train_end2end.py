@@ -56,6 +56,122 @@ def calculate_input_channels(config):
 
     return total_channels
 
+def apply_smote_augmentation(xyz_array, label_array, rgb_array, feature_dict,
+                             sampling_strategy, k_neighbors=5, random_state=42):
+    """
+    Apply SMOTE to generate synthetic training samples.
+
+    Args:
+        xyz_array: XYZ coordinates [N, 3]
+        label_array: Class labels [N]
+        rgb_array: RGB values [N, 3] or None
+        feature_dict: Dictionary of features {name: array}
+        total_target_samples: Target total number of samples after SMOTE
+        k_neighbors: Number of neighbors for SMOTE interpolation
+        random_state: Random seed
+
+    Returns:
+        Dictionary with augmented arrays
+    """
+    try:
+        from imblearn.over_sampling import SMOTE
+    except ImportError:
+        raise ImportError("imbalanced-learn is required for SMOTE. Install with: pip install imbalanced-learn")
+
+    print("\n" + "="*70)
+    print("SMOTE AUGMENTATION")
+    print("="*70)
+
+    # Show original distribution
+    print("\nOriginal class distribution:")
+    unique_labels, counts = np.unique(label_array, return_counts=True)
+    for label, count in zip(unique_labels, counts):
+        print(f"  Class {label}: {count:,} ({100*count/len(label_array):.2f}%)")
+    print(f"  Total: {len(label_array):,} samples")
+
+    # Build feature matrix
+    feature_list = [xyz_array]
+    if rgb_array is not None:
+        feature_list.append(rgb_array)
+    if feature_dict is not None:
+        for fname in sorted(feature_dict.keys()):
+            feat = feature_dict[fname]
+            if feat.ndim == 1:
+                feat = feat[:, np.newaxis]
+            feature_list.append(feat)
+
+    X = np.hstack(feature_list)  # [N, total_features]
+    y = label_array
+
+    # # Calculate sampling strategy to reach total_target_samples
+    # current_total = len(y)
+    # if total_target_samples <= current_total:
+    #     print(f"\n⚠️  Target samples ({total_target_samples:,}) <= current ({current_total:,})")
+    #     print("Skipping SMOTE augmentation")
+    #     return None
+
+    # # Distribute additional samples proportionally across classes
+    # n_to_add = total_target_samples - current_total
+    # class_proportions = counts / current_total
+
+    # sampling_strategy = {}
+    # for label, count, prop in zip(unique_labels, counts, class_proportions):
+    #     target_count = int(count + n_to_add * prop)
+    #     sampling_strategy[int(label)] = target_count
+
+    # print(f"\nSMOTE strategy (target: {total_target_samples:,} total samples):")
+    # for label in sorted(sampling_strategy.keys()):
+    #     orig_count = counts[unique_labels == label][0]
+    #     target_count = sampling_strategy[label]
+    #     print(f"  Class {label}: {orig_count:,} → {target_count:,} (+{target_count - orig_count:,} synthetic)")
+
+    # Apply SMOTE
+    print(f"\nApplying SMOTE with k_neighbors={k_neighbors}...")
+    smote = SMOTE(
+        sampling_strategy=sampling_strategy,
+        k_neighbors=k_neighbors,
+        random_state=random_state
+    )
+
+    X_resampled, y_resampled = smote.fit_resample(X, y)
+
+    # Show final distribution
+    print("\nFinal class distribution after SMOTE:")
+    unique_labels_final, counts_final = np.unique(y_resampled, return_counts=True)
+    for label, count in zip(unique_labels_final, counts_final):
+        print(f"  Class {label}: {count:,} ({100*count/len(y_resampled):.2f}%)")
+    print(f"  Total: {len(y_resampled):,} samples")
+    print(f"  Synthetic samples generated: {len(y_resampled) - len(y):,}")
+    print("="*70 + "\n")
+
+    # Split back into components
+    idx = 0
+    xyz_resampled = X_resampled[:, :3]
+    idx += 3
+
+    rgb_resampled = None
+    if rgb_array is not None:
+        rgb_resampled = X_resampled[:, idx:idx+3]
+        idx += 3
+
+    features_resampled = {}
+    if feature_dict is not None:
+        for fname in sorted(feature_dict.keys()):
+            feat_dim = feature_dict[fname].shape[1] if feature_dict[fname].ndim == 2 else 1
+            features_resampled[fname] = X_resampled[:, idx:idx+feat_dim]
+            if feat_dim == 1:
+                features_resampled[fname] = features_resampled[fname].flatten()
+            idx += feat_dim
+
+    return {
+        'xyz_array': xyz_resampled,
+        'label_array': y_resampled,
+        'rgb_array': rgb_resampled,
+        'features': features_resampled,
+        'n_original': len(y),
+        'n_synthetic': len(y_resampled) - len(y)
+    }
+
 
 def main():
     """Complete training pipeline from raw data to trained model"""
@@ -64,67 +180,86 @@ def main():
     # Configuration
     # =========================
     config = {
-        'run_name': 'test_run_knn_normals_rgb',
+        'run_name': 'test_run_knn_binary_normals_smote',
+
+        # ===== CLASSIFICATION MODE =====
+        # Options: 'binary' or 'multiclass'
+        # - 'binary': Only Joints (class 1) vs No-Joints (class 0). Unlabeled points ignored.
+        # - 'multiclass': Background (class 0), No-Joints (class 1), Joints (class 2). Unlabeled points become Background.
+        'classification_mode': 'binary',  # Change to 'binary' for 2-class classification
 
         # ===== DATA PATHS =====
         'las_file': '/home/yush/local_backup_geotech/geotech_pointnet/data/w_E_p1_6cm_all.las',
         'no_joints_dxf': '/home/yush/local_backup_geotech/geotech_cv/notebooks/dxfs/29 sept/no_joints_3_oct.dxf',
         'joints_dxf': '/home/yush/local_backup_geotech/geotech_cv/notebooks/dxfs/29 sept/polygon joints 29 sept.dxf',
-        'rgb_array': '/home/yush/local_backup_geotech/geotech_pointnet/data/rgb_array.npy',
-        'data_dir': './data/preprocessed',
+        # 'rgb_array': '/home/yush/local_backup_geotech/geotech_pointnet/data/rgb_array.npy',
+        'rgb_array':None,
+        'data_dir': './data/multi_bench_test/',
 
         # ===== TRAIN/TEST SPLIT =====
         # Define the line that separates train/test regions
-        'split_point_a': [464275, 9175697, 2546],
-        'split_point_b': [464294, 9175699, 2552],
+        # 'split_point_a': [464275, 9175697, 2546],
+        # 'split_point_b': [464294, 9175699, 2552],
+
+        'split_point_a':  [464293.65 , 9175861.23 , 2565.35 ],
+        'split_point_b':  [464232.35 , 9175853.74 , 2516.821 ],
 
         # ===== DATASET CONFIGURATION =====
         'dataset': {
             'type': 'knn',  # Options: 'polygon', 'voxel', 'knn'
             'params': {
-                'k_neighbors': 512,
+                'k_neighbors': 256,
                 'normalize_mode': 'center',
                 'augment_train': False,
-                'train_stride': 5,  # Use every 10th point for initial sampling
-                'test_stride': 3,    # Use every 3rd test point
+                'train_stride': 10,  # Use every 10th point for initial sampling
+                'test_stride': 10,    # Use every 3rd test point
                 'min_labeled_ratio': 0.0,
-                'cache_dir': './data/knn_cache',
+                'cache_dir': './data/knn_cache/big_test',
                 'feature_names': ['normals', 'curvature'],
                 'feature_k_neighbors': 30,
-                'feature_cache_dir': './data/feature_cache',
+                'feature_cache_dir': './data/feature_cache/big_test',
 
                 # Label sampling for class balancing (limits samples per class)
                 # None = no limit, int = same limit for all classes
                 # dict = per-class limits: {0: 50000, 1: 100000, 2: 100000}
-                'max_samples_per_class': {
-                    0: 20000,   # Background: max 50K samples
-                    1: 1000000,  # No-Joint: max 100K samples
-                    2: 1000000   # Joint: max 100K samples
-                }
+                # 'max_samples_per_class': {
+                #     0: 10000,   # Background: max 50K samples
+                #     1: 5000000,  # No-Joint: max 100K samples
+                #     2: 5000000   # Joint: max 100K samples
+                # }
             }
         },
 
-        # ===== MODEL PARAMETERS 1=====
+        # ===== MODEL PARAMETERS =====
         'use_rgb': False,      # Whether to use RGB features
-        'input_channels': 7,  # Will be set to 3 or 6 based on use_rgb
-        'num_classes': 3,     # 3-class: Background (0), No-Joint (1), Joint (2)
+        'input_channels': 6,  # Will be calculated automatically based on features
+        'num_classes': 2,  # Will be set automatically based on classification_mode (2 for binary, 3 for multiclass)
 
         # ===== DATA PARAMETERS (Backward compatibility) =====
         'patch_size': 1024,
         'normalize_mode': 'center',
         'augment_train': False,
 
+        # ===== DATA AUGMENTATION (SMOTE) =====
+        # Set total_train_samples to enable SMOTE augmentation
+        # None = no SMOTE, use original data
+        # int = target number of total training samples after SMOTE
+        'sampling_strategy': {0: 700000, 1:500000},  # e.g., 500000 to upsample to 500k samples
+        'smote_k_neighbors': 10,  # Number of neighbors for SMOTE interpolation
+
         # ===== TRAINING PARAMETERS =====
-        'batch_size': 796,
+        'batch_size': 512,
         'num_epochs': 50,
-        'learning_rate': 0.0001,
+        'learning_rate': 0.001,
         'weight_decay': 1e-4,
         'lr_decay_step': 20,
         'lr_decay_rate': 0.7,
 
         # ===== CLASS BALANCING (OPTIONAL) =====
-        # Set to [w0, w1] if classes are imbalanced (e.g., [1.0, 2.0])
-        'class_weights': [1, 3, 2], #16.2/20.9/62.8
+        # Binary mode: [w0, w1] for [No-Joint, Joint]
+        # Multiclass mode: [w0, w1, w2] for [Background, No-Joint, Joint]
+        # Set to None for no weighting
+        'class_weights': None,  # Example for multiclass: [Background, No-Joint, Joint]
 
         # ===== SAVING =====
         'save_dir': './checkpoints',
@@ -133,6 +268,31 @@ def main():
         # ===== REPRODUCIBILITY =====
         'seed': 42
     }
+
+    # =========================
+    # Validate and Set Classification Mode
+    # =========================
+    classification_mode = config.get('classification_mode', 'multiclass')
+    if classification_mode not in ['binary', 'multiclass']:
+        raise ValueError(f"classification_mode must be 'binary' or 'multiclass', got '{classification_mode}'")
+
+    # Set num_classes based on mode (override any manual setting)
+    if classification_mode == 'binary':
+        config['num_classes'] = 2  # No-Joint (0), Joint (1)
+        print(f"\n{'='*70}")
+        print(f"CLASSIFICATION MODE: BINARY (2 classes)")
+        print(f"  Class 0: No-Joint")
+        print(f"  Class 1: Joint")
+        print(f"  Note: Unlabeled points (label=-1) will be excluded from training")
+        print(f"{'='*70}\n")
+    else:  # multiclass
+        config['num_classes'] = 3  # Background (0), No-Joint (1), Joint (2)
+        print(f"\n{'='*70}")
+        print(f"CLASSIFICATION MODE: MULTICLASS (3 classes)")
+        print(f"  Class 0: Background (unlabeled points)")
+        print(f"  Class 1: No-Joint")
+        print(f"  Class 2: Joint")
+        print(f"{'='*70}\n")
 
     data_dir = config['data_dir']
     os.makedirs(data_dir, exist_ok=True)
@@ -168,7 +328,6 @@ def main():
     preprocessed_path = os.path.join(data_dir,'preprocessed_data.npz')
     polygons_path = os.path.join(data_dir, 'polygons_dict.pkl')
 
-    # Check if preprocessed data exists
     if os.path.exists(preprocessed_path) and os.path.exists(polygons_path):
         print("\n" + "="*70)
         print("STEP 1: LOADING PREPROCESSED DATA")
@@ -181,7 +340,10 @@ def main():
         label_array = data['label_array']
         train_mask = data['train_mask']
         test_mask = data['test_mask']
-        rgb_array = data['rgb_array'] if 'rgb_array' in data else None
+        if config['use_rgb']:
+          rgb_array = np.load(config['rgb_array'])
+        else:
+          rgb_array = None
 
         print(f"Loaded point cloud: {len(xyz_array):,} points")
         if rgb_array is not None:
@@ -190,6 +352,27 @@ def main():
             print(f"RGB features available: No")
         print(f"Training points: {np.sum(train_mask):,}")
         print(f"Test points: {np.sum(test_mask):,}")
+
+        # CRITICAL: Check if labels need to be remapped based on classification mode
+        unique_labels = np.unique(label_array)
+        print(f"\nLoaded label range: {unique_labels}")
+
+        if classification_mode == 'binary':
+            # Binary mode expects labels: -1 (unlabeled), 0 (no-joint), 1 (joint)
+            # If labels are [0, 1, 2], they were saved in multiclass mode - need to remap back
+            if np.min(unique_labels) >= 0 and np.max(unique_labels) >= 2:
+                print("⚠️  WARNING: Preprocessed data has multiclass labels [0, 1, 2]")
+                print("⚠️  Binary mode requires [-1, 0, 1]. Remapping back...")
+                # Remap: 0 → -1, 1 → 0, 2 → 1
+                label_array = label_array - 1
+                print(f"✅ Labels remapped: {np.unique(label_array)}")
+        elif classification_mode == 'multiclass':
+            # Multiclass mode expects labels already as [0, 1, 2] after loading
+            # If labels are [-1, 0, 1], they need to be shifted
+            if np.min(unique_labels) < 0:
+                print("Labels are in binary format [-1, 0, 1], will be shifted to [0, 1, 2]")
+            else:
+                print("Labels already in multiclass format [0, 1, 2]")
 
     #     # Load polygon dictionaries
     #     import pickle
@@ -276,11 +459,57 @@ def main():
         print(f"\nDataset type '{dataset_type}' does not require polygon dictionaries")
 
     # =========================
+    # Handle Label Remapping for Multi-Class Classification
+    # =========================
+    # NOTE: Binary mode filtering happens in DatasetFactory._create_knn_datasets()
+    # to ensure KDTree is built only on labeled points
+
+    if classification_mode == 'multiclass':
+        print("\n" + "="*70)
+        print("MULTICLASS MODE: Converting unlabeled points to Background")
+        print("="*70)
+        print("Original labels: -1 (unlabeled), 0 (no-joint), 1 (joint)")
+        print("New labels: 0 (background), 1 (no-joint), 2 (joint)")
+
+        # Remap: -1 → 0 (background), 0 → 1 (no-joint), 1 → 2 (joint)
+        original_label_counts = np.bincount(label_array[label_array >= 0])
+        unlabeled_count = np.sum(label_array == -1)
+
+        # Shift all labels by +1 (this makes -1→0, 0→1, 1→2)
+        label_array = label_array + 1
+
+        print(f"\nLabel counts after remapping:")
+        print(f"  Background (class 0): {unlabeled_count:,} points (was unlabeled)")
+        if len(original_label_counts) > 0:
+            print(f"  No-Joint (class 1): {original_label_counts[0]:,} points (was class 0)")
+        if len(original_label_counts) > 1:
+            print(f"  Joint (class 2): {original_label_counts[1]:,} points (was class 1)")
+        print("="*70 + "\n")
+
+    # =========================
     # Step 2: Create Datasets
     # =========================
     print("\n" + "="*70)
     print("STEP 2: CREATING DATASETS")
     print("="*70)
+
+    # DEBUG: Verify label distribution before dataset creation
+    print(f"\nDEBUG - Label distribution check:")
+    print(f"  Full point cloud: {len(xyz_array):,} points")
+    print(f"  Train mask: {np.sum(train_mask):,} points selected")
+    print(f"  Test mask: {np.sum(test_mask):,} points selected")
+    train_label_unique = np.unique(label_array[train_mask])
+    test_label_unique = np.unique(label_array[test_mask])
+    print(f"  Train labels present: {train_label_unique}")
+    print(f"  Test labels present: {test_label_unique}")
+    for label in train_label_unique:
+        count = np.sum(label_array[train_mask] == label)
+        print(f"    Train class {label}: {count:,} points")
+    for label in test_label_unique:
+        count = np.sum(label_array[test_mask] == label)
+        print(f"    Test class {label}: {count:,} points")
+    print(f"  Expected num_classes: {config['num_classes']}")
+    print()
 
     # Update input_channels based on RGB availability
     if rgb_array is not None and config['use_rgb']:
@@ -296,9 +525,80 @@ def main():
 
     print(f"\nUsing {config['input_channels']}-channel input (XYZ{'+RGB' if config['input_channels'] == 6 else ''})")
 
+    # Set feature cache key based on LAS filename for consistent caching
+    las_basename = os.path.splitext(os.path.basename(config['las_file']))[0]
+    config['dataset']['params']['feature_cache_key'] = las_basename
+    print(f"\nFeature cache key set to: {las_basename}")
+
+    # =========================
+    # SMOTE Augmentation (Optional)
+    # =========================
+    smote_applied = False
+    if config.get('total_train_samples') is not None:
+        # Load features if needed for SMOTE
+        feature_names = config.get('dataset', {}).get('params', {}).get('feature_names', None)
+        feature_dict_train = None
+
+        if feature_names is not None and len(feature_names) > 0:
+            from feature_factory import FeatureFactory
+            feature_cache_dir = config.get('dataset', {}).get('params', {}).get('feature_cache_dir', './data/feature_cache')
+            feature_k = config.get('dataset', {}).get('params', {}).get('feature_k_neighbors', 30)
+
+            print(f"\nLoading features for SMOTE: {feature_names}")
+            full_features = FeatureFactory.get_features(
+                xyz_array=xyz_array,
+                feature_names=feature_names,
+                k_neighbors=feature_k,
+                cache_dir=feature_cache_dir,
+                cache_key=las_basename
+            )
+
+            # Extract train features
+            feature_dict_train = {}
+            for fname in feature_names:
+                feature_dict_train[fname] = full_features[fname][train_mask]
+
+        # Apply SMOTE to training data only
+        smote_result = apply_smote_augmentation(
+            xyz_array=xyz_array[train_mask],
+            label_array=label_array[train_mask],
+            rgb_array=rgb_array[train_mask] if rgb_array is not None else None,
+            feature_dict=feature_dict_train,
+            sampling_strategy=config.get('sampling_strategy',None),
+            k_neighbors=config.get('smote_k_neighbors', 5),
+            random_state=config.get('seed', 42)
+        )
+
+        if smote_result is not None:
+            # Replace training data with SMOTE-augmented data
+            # We need to update xyz_array, label_array, rgb_array to include synthetic points
+            # and update train_mask to include the new synthetic points
+
+            n_original = len(xyz_array)
+            n_synthetic = smote_result['n_synthetic']
+
+            # Append synthetic points to arrays
+            xyz_array = np.vstack([xyz_array, smote_result['xyz_array'][smote_result['n_original']:]])
+            label_array = np.concatenate([label_array, smote_result['label_array'][smote_result['n_original']:]])
+
+            if rgb_array is not None:
+                rgb_array = np.vstack([rgb_array, smote_result['rgb_array'][smote_result['n_original']:]])
+
+            # Extend train_mask to include synthetic points (all marked as train)
+            synthetic_train_mask = np.ones(n_synthetic, dtype=bool)
+            train_mask = np.concatenate([train_mask, synthetic_train_mask])
+
+            # Extend test_mask (synthetic points not in test)
+            synthetic_test_mask = np.zeros(n_synthetic, dtype=bool)
+            test_mask = np.concatenate([test_mask, synthetic_test_mask])
+
+            smote_applied = True
+            print(f"✅ SMOTE applied: {n_original:,} → {len(xyz_array):,} total points")
+            print(f"   Training points: {np.sum(train_mask):,} (including {n_synthetic:,} synthetic)")
+
     # Create datasets using factory
     print("\n" + "="*70)
-    print("DATASET CREATION")
+    print("DATASET CREATION" + (" (with SMOTE augmentation)" if smote_applied else ""))
     print("="*70)
 
     train_dataset, test_dataset = DatasetFactory.create_train_test_datasets(
@@ -357,12 +657,18 @@ def main():
         unique_train = np.unique(train_labels)
         unique_test = np.unique(test_labels)
 
+        # Get class names based on classification mode
+        if classification_mode == 'binary':
+            class_names = ['No-Joint', 'Joint']
+        else:
+            class_names = ['Background', 'No-Joint', 'Joint']
+
         print("\nTraining Dataset:")
         train_total = len(train_labels)
         for cls in sorted(unique_train):
             count = np.sum(train_labels == cls)
             pct = 100 * count / train_total
-            class_name = ['Background', 'No-Joint', 'Joint'][int(cls)] if cls < 3 else f'Class {cls}'
+            class_name = class_names[int(cls)] if cls < len(class_names) else f'Class {cls}'
             print(f"  {class_name} (class {cls}): {count:,} samples ({pct:.2f}%)")
         print(f"  Total: {train_total:,} samples")
 
@@ -371,7 +677,7 @@ def main():
         for cls in sorted(unique_test):
             count = np.sum(test_labels == cls)
             pct = 100 * count / test_total
-            class_name = ['Background', 'No-Joint', 'Joint'][int(cls)] if cls < 3 else f'Class {cls}'
+            class_name = class_names[int(cls)] if cls < len(class_names) else f'Class {cls}'
             print(f"  {class_name} (class {cls}): {count:,} samples ({pct:.2f}%)")
         print(f"  Total: {test_total:,} samples")
 

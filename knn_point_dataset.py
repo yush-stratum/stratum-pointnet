@@ -38,7 +38,8 @@ class KNNPointDataset(Dataset):
                  stride=1, min_labeled_ratio=0.0, max_samples_per_class=None,
                  feature_names: Optional[List[str]] = None,
                  feature_k_neighbors: int = 30,
-                 feature_cache_dir: str = './data/feature_cache'):
+                 feature_cache_dir: str = './data/feature_cache',
+                 feature_cache_key: Optional[str] = None):
         """
         Args:
             xyz_array: Full point cloud coordinates [N, 3]
@@ -61,6 +62,8 @@ class KNNPointDataset(Dataset):
                           None = use only XYZ (and RGB if available)
             feature_k_neighbors: Number of neighbors for feature computation (default: 30)
             feature_cache_dir: Directory to cache computed features
+            feature_cache_key: Optional explicit cache key for features (e.g., source filename)
+                              If None, auto-generated from point cloud hash
         """
         self.xyz_array = xyz_array
         self.label_array = label_array if label_array is not None else np.full(len(xyz_array), -1)
@@ -77,6 +80,7 @@ class KNNPointDataset(Dataset):
         self.feature_names = feature_names
         self.feature_k_neighbors = feature_k_neighbors
         self.feature_cache_dir = feature_cache_dir
+        self.feature_cache_key = feature_cache_key
         self.features = None  # Will store computed features if requested
 
         print(f"\n{'='*70}")
@@ -103,10 +107,12 @@ class KNNPointDataset(Dataset):
             self.center_point_indices = point_indices
             print(f"Using {len(point_indices):,} provided center points")
         else:
-            # Use strided sampling from ALL points (3-class includes background as class 0)
+            # Use strided sampling from ALL provided points
+            # Note: In binary mode, unlabeled points are pre-filtered in train_end2end.py
+            # In multiclass mode, unlabeled points become class 0 (background)
             all_indices = np.arange(len(self.xyz_array))
             self.center_point_indices = all_indices[::stride]
-            print(f"Using every {stride}th point as center (all points have labels in 3-class mode)")
+            print(f"Using every {stride}th point as center")
             print(f"Center points selected: {len(self.center_point_indices):,}")
 
         # Pre-compute or load KNN indices (for ALL center points after stride)
@@ -130,11 +136,14 @@ class KNNPointDataset(Dataset):
         if feature_names is not None and len(feature_names) > 0:
             from feature_factory import FeatureFactory
             print(f"\nRequested features: {feature_names}")
+            if feature_cache_key is not None:
+                print(f"Using explicit feature cache key: {feature_cache_key}")
             self.features = FeatureFactory.get_features(
                 xyz_array=self.xyz_array,
                 feature_names=feature_names,
                 k_neighbors=feature_k_neighbors,
-                cache_dir=feature_cache_dir
+                cache_dir=feature_cache_dir,
+                cache_key=feature_cache_key
             )
             print(f"Features loaded/computed successfully ✅")
 
@@ -578,7 +587,8 @@ def create_train_test_knn_datasets(xyz_array, label_array, train_mask, test_mask
                                    max_samples_per_class=None,
                                    feature_names: Optional[List[str]] = None,
                                    feature_k_neighbors: int = 30,
-                                   feature_cache_dir: str = './data/feature_cache'):
+                                   feature_cache_dir: str = './data/feature_cache',
+                                   feature_cache_key: Optional[str] = None):
     """
     Create training and test KNN datasets
 
@@ -601,6 +611,9 @@ def create_train_test_knn_datasets(xyz_array, label_array, train_mask, test_mask
                       Options: 'normals', 'curvature', 'roughness', 'linearity', 'planarity', 'sphericity'
         feature_k_neighbors: Number of neighbors for feature computation
         feature_cache_dir: Directory to cache computed features
+        feature_cache_key: Optional explicit cache key for features (e.g., source filename)
+                          If provided, both train and test will use the same cache
+                          (features computed on full point cloud, indexed by masks)
 
     Returns:
         train_dataset, test_dataset
@@ -625,7 +638,8 @@ def create_train_test_knn_datasets(xyz_array, label_array, train_mask, test_mask
         max_samples_per_class=max_samples_per_class,  # Label sampling for training only
         feature_names=feature_names,
         feature_k_neighbors=feature_k_neighbors,
-        feature_cache_dir=feature_cache_dir
+        feature_cache_dir=feature_cache_dir,
+        feature_cache_key=feature_cache_key
     )
 
     print("\n" + "="*70)
@@ -645,7 +659,8 @@ def create_train_test_knn_datasets(xyz_array, label_array, train_mask, test_mask
         min_labeled_ratio=0.0,  # Don't filter test set
         feature_names=feature_names,
         feature_k_neighbors=feature_k_neighbors,
-        feature_cache_dir=feature_cache_dir
+        feature_cache_dir=feature_cache_dir,
+        feature_cache_key=feature_cache_key
     )
 
     print("\n" + "="*70)

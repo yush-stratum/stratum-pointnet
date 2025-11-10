@@ -61,7 +61,8 @@ class FeatureFactory:
         feature_names: List[str],
         k_neighbors: int = 30,
         cache_dir: str = './data/feature_cache',
-        force_recompute: bool = False
+        force_recompute: bool = False,
+        cache_key: Optional[str] = None
     ) -> Dict[str, np.ndarray]:
         """
         Get requested features, computing only what's missing from cache.
@@ -72,6 +73,7 @@ class FeatureFactory:
             k_neighbors: Number of neighbors for feature computation
             cache_dir: Directory to store cached features
             force_recompute: If True, ignore cache and recompute all
+            cache_key: Optional explicit cache key (if None, auto-generated from xyz_array)
 
         Returns:
             Dictionary mapping feature names to arrays
@@ -80,7 +82,8 @@ class FeatureFactory:
             features = FeatureFactory.get_features(
                 xyz_array=xyz,
                 feature_names=['normals', 'planarity'],
-                k_neighbors=30
+                k_neighbors=30,
+                cache_key='my_point_cloud'  # Optional: ensures consistent caching
             )
             # Returns: {'normals': [N,3], 'planarity': [N]}
         """
@@ -95,8 +98,13 @@ class FeatureFactory:
         # Create cache directory
         os.makedirs(cache_dir, exist_ok=True)
 
-        # Generate cache key based on point cloud and k_neighbors
-        cache_key = FeatureFactory._generate_cache_key(xyz_array, k_neighbors)
+        # Generate cache key based on point cloud and k_neighbors (if not provided)
+        if cache_key is None:
+            cache_key = FeatureFactory._generate_cache_key(xyz_array, k_neighbors)
+        else:
+            # If explicit cache key provided, append k_neighbors for uniqueness
+            cache_key = f"{cache_key}_k{k_neighbors}"
+
         cache_path = os.path.join(cache_dir, f"features_{cache_key}.pkl")
 
         # Load existing cache

@@ -201,6 +201,25 @@ class DatasetFactory:
         feature_names = dataset_params.get('feature_names', None)
         feature_k_neighbors = dataset_params.get('feature_k_neighbors', 30)
         feature_cache_dir = dataset_params.get('feature_cache_dir', './data/feature_cache')
+        feature_cache_key = dataset_params.get('feature_cache_key', None)
+
+        # CRITICAL: For binary mode, filter to only labeled points BEFORE passing to dataset
+        # This ensures KDTree is built only on labeled points
+        classification_mode = config.get('classification_mode', 'multiclass')
+        if classification_mode == 'binary':
+            print("\n" + "="*70)
+            print("DATASET FACTORY: Binary mode - filtering to labeled points only")
+            print("="*70)
+            # Train set: only use labeled points within train region
+            train_labeled = train_mask & (label_array >= 0)
+            test_labeled = test_mask & (label_array >= 0)
+
+            print(f"  Train: {np.sum(train_mask):,} → {np.sum(train_labeled):,} (removed {np.sum(train_mask) - np.sum(train_labeled):,} unlabeled)")
+            print(f"  Test: {np.sum(test_mask):,} → {np.sum(test_labeled):,} (removed {np.sum(test_mask) - np.sum(test_labeled):,} unlabeled)")
+            print("="*70 + "\n")
+
+            train_mask = train_labeled
+            test_mask = test_labeled
 
         return create_train_test_knn_datasets(
             xyz_array=xyz_array,
@@ -218,7 +237,8 @@ class DatasetFactory:
             max_samples_per_class=max_samples_per_class,
             feature_names=feature_names,
             feature_k_neighbors=feature_k_neighbors,
-            feature_cache_dir=feature_cache_dir
+            feature_cache_dir=feature_cache_dir,
+            feature_cache_key=feature_cache_key
         )
 
     @staticmethod
@@ -290,6 +310,12 @@ class DatasetFactory:
             cache_dir = dataset_params.get('cache_dir', './data/knn_cache')
             cache_path = os.path.join(cache_dir, 'inference_knn_cache.pkl')
 
+            # Feature parameters (should match training config)
+            feature_names = dataset_params.get('feature_names', None)
+            feature_k_neighbors = dataset_params.get('feature_k_neighbors', 30)
+            feature_cache_dir = dataset_params.get('feature_cache_dir', './data/feature_cache')
+            feature_cache_key = dataset_params.get('feature_cache_key', None)
+
             return KNNPointDataset(
                 xyz_array=xyz_array,
                 label_array=label_array,
@@ -298,7 +324,11 @@ class DatasetFactory:
                 normalize_mode=normalize_mode,
                 augment=False,  # Never augment during inference
                 cache_path=cache_path,
-                stride=stride
+                stride=stride,
+                feature_names=feature_names,
+                feature_k_neighbors=feature_k_neighbors,
+                feature_cache_dir=feature_cache_dir,
+                feature_cache_key=feature_cache_key
             )
 
     @staticmethod

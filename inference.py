@@ -1,6 +1,9 @@
 """
 Inference script for PointNet++ on full point clouds
 Outputs per-point predictions to new LAS file
+
+IMPORTANT: Automatically loads training configuration from checkpoint directory
+to ensure inference uses the same settings (features, normalization, etc.) as training.
 """
 
 import numpy as np
@@ -9,6 +12,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import laspy
 import os
+import json
 from collections import defaultdict
 
 from pointnet2_model import PointNet2Segmentation
@@ -18,40 +22,117 @@ from dataset_factory import DatasetFactory
 class PointCloudInference:
     """
     Inference engine for full point cloud prediction
+
+    Automatically loads training configuration to ensure consistency.
     """
-    def __init__(self, model_path, config):
+    def __init__(self, model_path, inference_overrides=None):
         """
         Args:
-            model_path: Path to trained model checkpoint
-            config: Dict with inference configuration
+            model_path: Path to trained model checkpoint (.pth file)
+            inference_overrides: Optional dict with inference-specific overrides
+                                (e.g., batch_size, stride). Training config is loaded
+                                automatically and overrides are applied on top.
+
+        Example:
+            inference = PointCloudInference(
+                model_path='./checkpoints/run_1/best_model.pth',
+                inference_overrides={
+                    'batch_size': 32,  # Override for inference
+                    'dataset': {
+                        'params': {
+                            'test_stride': 1  # Override stride for full coverage
+                        }
+                    }
+                }
+            )
         """
-        self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {self.device}")
 
-        # Load model
-        print(f"Loading model from {model_path}")
+        # Load checkpoint
+        print(f"\nLoading checkpoint from: {model_path}")
         checkpoint = torch.load(model_path, map_location=self.device)
 
+        # Load training config from checkpoint directory
+        checkpoint_dir = os.path.dirname(model_path)
+        config_path = os.path.join(checkpoint_dir, 'config.json')
+
+        if os.path.exists(config_path):
+            print(f"Loading training config from: {config_path}")
+            with open(config_path, 'r') as f:
+                self.config = json.load(f)
+            print("✅ Training configuration loaded successfully")
+        else:
+            # Fallback to checkpoint config if config.json not found
+            print(f"⚠️  WARNING: config.json not found in {checkpoint_dir}")
+            if 'config' in checkpoint:
+                print("Using config from checkpoint (may be incomplete)")
+                self.config = checkpoint['config']
+            else:
+                raise FileNotFoundError(
+                    f"No config.json found in {checkpoint_dir} and no config in checkpoint. "
+                    f"Cannot proceed with inference without training configuration."
+                )
+
+        # Apply inference overrides if provided
+        if inference_overrides is not None:
+            print("\nApplying inference overrides:")
+            self._apply_overrides(self.config, inference_overrides)
+
+        # Print key configuration
+        print(f"\n{'='*70}")
+        print("INFERENCE CONFIGURATION")
+        print(f"{'='*70}")
+        print(f"Model architecture:")
+        print(f"  - Input channels: {self.config['input_channels']}")
+        print(f"  - Number of classes: {self.config['num_classes']}")
+        print(f"\nDataset settings:")
+        print(f"  - Type: {self.config['dataset']['type']}")
+        print(f"  - Use RGB: {self.config.get('use_rgb', False)}")
+
+        feature_names = self.config['dataset']['params'].get('feature_names', None)
+        if feature_names:
+            print(f"  - Geometric features: {feature_names}")
+        else:
+            print(f"  - Geometric features: None")
+
+        print(f"  - Normalization: {self.config['dataset']['params'].get('normalize_mode', 'center')}")
+        print(f"  - K neighbors: {self.config['dataset']['params'].get('k_neighbors', 'N/A')}")
+        print(f"{'='*70}\n")
+
+        # Handle voxel size if present
         voxel_size = checkpoint.get('voxel_size', None)
         if voxel_size is not None:
             print(f"Using voxel size from checkpoint: {voxel_size:.4f} m")
             self.config['voxel_size'] = voxel_size
-        else:
-            print("WARNING: No voxel size in checkpoint, will auto-compute")
 
-        # Initialize model (use classification model for patch-based inference)
-        from pointnet2_model import PointNet2Classification, PointNet2Segmentation
+        # Initialize model with training configuration
         self.model = PointNet2Segmentation(
-            num_classes=config['num_classes'],
-            input_channels=config['input_channels']
+            num_classes=self.config['num_classes'],
+            input_channels=self.config['input_channels']
         )
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model = self.model.to(self.device)
         self.model.eval()
 
-        print(f"Model loaded successfully (trained to epoch {checkpoint['epoch']})")
-        print(f"Training accuracy: {checkpoint.get('test_acc', 'N/A')}")
+        print(f"✅ Model loaded successfully")
+        print(f"   - Trained to epoch: {checkpoint['epoch']}")
+        print(f"   - Training test accuracy: {checkpoint.get('test_acc', 'N/A'):.4f}" if checkpoint.get('test_acc') else "")
+
+    def _apply_overrides(self, base_config, overrides):
+        """
+        Recursively apply override values to base config
+        """
+        for key, value in overrides.items():
+            if isinstance(value, dict) and key in base_config and isinstance(base_config[key], dict):
+                # Recursive merge for nested dicts
+                self._apply_overrides(base_config[key], value)
+                print(f"  - Overriding {key}: <nested dict>")
+            else:
+                # Direct override
+                old_value = base_config.get(key, '<not set>')
+                base_config[key] = value
+                print(f"  - Overriding {key}: {old_value} → {value}")
 
     # def predict_point_cloud(self, xyz_array, rgb_array=None, batch_size=16):
     #     """
@@ -197,28 +278,40 @@ class PointCloudInference:
 
         return predictions, probabilities
 
-    def get_train_test_mask(self):
-        data = np.load(self.config['data_ckpt'])
+    def get_train_test_mask(self, data_ckpt):
+        """
+        Load train/test masks and ground truth labels from preprocessed data.
+
+        Handles both binary and multiclass modes:
+        - Binary: labels are 0 (no-joint), 1 (joint), -1 (unlabeled) → saved as 1, 2, 0
+        - Multiclass: labels are 0 (background), 1 (no-joint), 2 (joint) → saved as 1, 2, 3
+        """
+        data = np.load(data_ckpt)
         xyz_array = data['xyz_array']
         label_array = data['label_array']
         train_mask = data['train_mask']
         test_mask = data['test_mask']
 
+        # Get classification mode from config
+        classification_mode = self.config.get('classification_mode', 'multiclass')
+
         train_classification_array = np.zeros_like(label_array)
-        train_classification_array -= 1 #label array is -1 for unassigned
+        train_classification_array -= 1  # Start with -1 for all
         train_classification_array[np.where(train_mask)[0]] = label_array[np.where(train_mask)[0]]
 
         test_classification_array = np.zeros_like(label_array)
         test_classification_array -= 1
         test_classification_array[np.where(test_mask)[0]] = label_array[np.where(test_mask)[0]]
 
+        # Shift by +1 for LAS storage (0 reserved for "unclassified")
         train_classification_array += 1
         test_classification_array += 1
+        ground_truth = (label_array + 1).astype(np.uint8)
 
-        return train_classification_array.astype(np.uint8), test_classification_array.astype(np.uint8), (label_array+1).astype(np.uint8)
+        return train_classification_array.astype(np.uint8), test_classification_array.astype(np.uint8), ground_truth
 
     def save_predictions_to_las(self, input_las_path, output_las_path,
-                                predictions, probabilities):
+                                predictions, probabilities, data_ckpt):
         """
         Save predictions to new LAS file
 
@@ -227,6 +320,7 @@ class PointCloudInference:
             output_las_path: Output LAS file path
             predictions: [N] array with class predictions
             probabilities: [N, num_classes] array with probabilities
+            data_ckpt: checkpoint for preprocessed data
         """
         print(f"\nSaving predictions to {output_las_path}")
 
@@ -259,25 +353,35 @@ class PointCloudInference:
         new_las.classification = (predictions+1).astype(np.uint8)
 
         # Train/Test masks
-        train_mask, test_mask, label_arr = self.get_train_test_mask()
+        train_mask, test_mask, label_arr = self.get_train_test_mask(data_ckpt)
 
         # Add probabilities as extra dimensions if supported
         try:
-            # Add probability for class 0
-            new_las.add_extra_dim(laspy.ExtraBytesParams(
-                name="prob_class_0",
-                type=np.float32
-            ))
-            new_las.prob_class_0 = probabilities[:, 0]
+            # Dynamically add probability fields for all classes
+            num_classes = self.config['num_classes']
+            classification_mode = self.config.get('classification_mode', 'multiclass')
 
-            # Add probability for class 1
-            new_las.add_extra_dim(laspy.ExtraBytesParams(
-                name="prob_class_1",
-                type=np.float32
-            ))
-            new_las.prob_class_1 = probabilities[:, 1]
+            print(f"\nAdding {num_classes} probability fields to LAS file...")
 
+            # Get class names for better field naming
+            if classification_mode == 'binary':
+                class_names = ['no_joint', 'joint']
+            elif num_classes == 3:
+                class_names = ['background', 'no_joint', 'joint']
+            else:
+                class_names = [f'class_{i}' for i in range(num_classes)]
 
+            # Add probability field for each class
+            for class_id in range(num_classes):
+                field_name = f"prob_{class_names[class_id]}"
+                new_las.add_extra_dim(laspy.ExtraBytesParams(
+                    name=field_name,
+                    type=np.float32
+                ))
+                setattr(new_las, field_name, probabilities[:, class_id])
+                print(f"  Added field: {field_name}")
+
+            # Add train/test masks
             new_las.add_extra_dim(laspy.ExtraBytesParams(
                 name="train_mask",
                 type=np.uint8
@@ -296,97 +400,112 @@ class PointCloudInference:
             ))
             new_las.label_arr = label_arr
 
-
-            print("Added probability fields to LAS file")
+            print("✅ Successfully added all probability and mask fields to LAS file")
         except Exception as e:
-            print(f"Warning: Could not add probability fields: {e}")
+            print(f"⚠️  Warning: Could not add probability fields: {e}")
 
         # Write to file
         new_las.write(output_las_path)
         print(f"Successfully saved predictions to {output_las_path}")
 
         # Print statistics
-        print("\nPrediction Statistics:")
-        for class_id in range(self.config['num_classes']):
+        print("\n" + "="*70)
+        print("PREDICTION STATISTICS")
+        print("="*70)
+
+        num_classes = self.config['num_classes']
+        classification_mode = self.config.get('classification_mode', 'multiclass')
+
+        # Get class names
+        if classification_mode == 'binary':
+            class_display_names = ['No-Joint', 'Joint']
+        elif num_classes == 3:
+            class_display_names = ['Background', 'No-Joint', 'Joint']
+        else:
+            class_display_names = [f'Class {i}' for i in range(num_classes)]
+
+        for class_id in range(num_classes):
             count = np.sum(predictions == class_id)
             percentage = 100 * count / len(predictions)
             avg_prob = np.mean(probabilities[predictions == class_id, class_id]) if count > 0 else 0
-            print(f"  Class {class_id}: {count} points ({percentage:.2f}%) "
+            class_name = class_display_names[class_id] if class_id < len(class_display_names) else f'Class {class_id}'
+            print(f"  {class_name} (class {class_id}): {count:,} points ({percentage:.2f}%) "
                   f"| Avg confidence: {avg_prob:.3f}")
+
+        print("="*70)
 
 
 def main():
-    """Main inference function"""
+    """
+    Main inference function
+
+    NOTE: Training configuration is automatically loaded from checkpoint directory.
+    You only need to specify:
+    1. Model path
+    2. Input/output paths
+    3. Optional inference-specific overrides (batch_size, stride, etc.)
+    """
 
     # =========================
     # Configuration
     # =========================
-    config = {
-        # Model path
-        'model_path': './checkpoints/test_run_knn_integration/best_model_acc0.7615.pth',
+    # Model checkpoint path (must point to .pth file in checkpoint directory with config.json)
+    model_path = '/home/yush/local_backup_geotech/geotech_pointnet/checkpoints/test_run_knn_normals_rgb/checkpoint_epoch25.pth'
 
-        # Input/Output
-        'input_las': '/home/yush/local_backup_geotech/geotech_pointnet/data/w_E_p1_6cm_all.las',
-        'output_las': './predictions/w_E_p1_6cm_all_predicted_knn_1024.las',
-        "data_ckpt": "./data/preprocessed/preprocessed_data.npz",
+    # Input/Output paths
+    input_las = '/home/yush/local_backup_geotech/geotech_pointnet/data/w_E_p1_6cm_all.las'
+    output_las = './predictions/w_E_p1_6cm_all_predicted_knn_1024.las'
+    data_ckpt = "./data/preprocessed/preprocessed_data.npz"
 
-        # Dataset configuration
+    # Optional: Inference-specific overrides
+    # Training config is loaded automatically, but you can override specific values
+    inference_overrides = {
+        'batch_size': 1024,  # Override batch size for inference
+        'input_channels':10,
         'dataset': {
-            'type': 'knn',  # Must match training
             'params': {
-                'k_neighbors': 1024,
-                'normalize_mode': 'center',
-                'inference_stride': 5,  # Use every 100th point for faster inference
-                'cache_dir': './data/knn_cache'
+                'inference_stride': 10,  # Override stride for faster/slower inference
+                # 'cache_dir' is inherited from training config
             }
-        },
-
-        # Model parameters (must match training)
-        'num_classes': 3,      # 3-class: Background (0), No-Joint (1), Joint (2)
-        'use_rgb': False,      # Whether to use RGB features (must match training)
-        'input_channels': 3,   # Will be set to 3 or 6 based on use_rgb
-
-        # Inference parameters (backward compatibility)
-        'patch_size': 1024,
-        'normalize_mode': 'center',
-        'batch_size': 1024,
+        }
     }
 
     # Create output directory
-    os.makedirs(os.path.dirname(config['output_las']), exist_ok=True)
-
-    # =========================
-    # Load Point Cloud
-    # =========================
-    print("Loading point cloud...")
-    las = laspy.read(config['input_las'])
-    xyz_array = np.vstack([las.x, las.y, las.z]).transpose()
-    print(f"Loaded {len(xyz_array)} points")
-
-    # Extract RGB if requested
-    rgb_array = None
-    if config['use_rgb']:
-        if hasattr(las, 'red') and hasattr(las, 'green') and hasattr(las, 'blue'):
-            rgb_array = np.vstack([las.red, las.green, las.blue]).transpose().astype(np.float32)
-            rgb_array = rgb_array / 65535.0  # Normalize to [0, 1]
-            print(f"Extracted RGB colors")
-            config['input_channels'] = 6
-        else:
-            print("WARNING: RGB requested but not available in LAS file. Using XYZ only.")
-            config['use_rgb'] = False
-            config['input_channels'] = 3
-    else:
-        config['input_channels'] = 3
-
-    print(f"Using {config['input_channels']}-channel input (XYZ{'+RGB' if config['input_channels'] == 6 else ''})")
+    os.makedirs(os.path.dirname(output_las), exist_ok=True)
 
     # =========================
     # Initialize Inference Engine
     # =========================
+    # Training config (including features, normalization, RGB, etc.) loaded automatically
     inference_engine = PointCloudInference(
-        model_path=config['model_path'],
-        config=config
+        model_path=model_path,
+        inference_overrides=inference_overrides
     )
+
+    # =========================
+    # Load Point Cloud
+    # =========================
+    print("\n" + "="*70)
+    print("LOADING POINT CLOUD")
+    print("="*70)
+    print(f"Loading point cloud from: {input_las}")
+    las = laspy.read(input_las)
+    xyz_array = np.vstack([las.x, las.y, las.z]).transpose()
+    print(f"✅ Loaded {len(xyz_array):,} points")
+
+    # Extract RGB if training used RGB
+    rgb_array = None
+    if inference_engine.config.get('use_rgb', False):
+        if hasattr(las, 'red') and hasattr(las, 'green') and hasattr(las, 'blue'):
+            rgb_array = np.vstack([las.red, las.green, las.blue]).transpose().astype(np.float32)
+            rgb_array = rgb_array / 65535.0  # Normalize to [0, 1]
+            print(f"✅ Extracted RGB colors (training used RGB)")
+        else:
+            print("⚠️  WARNING: Training used RGB but not available in LAS file.")
+            print("    Inference may fail or produce incorrect results.")
+            raise ValueError("RGB required by training config but not found in LAS file")
+    else:
+        print("RGB not used (training config: use_rgb=False)")
 
     # =========================
     # Run Prediction
@@ -394,24 +513,27 @@ def main():
     predictions, probabilities = inference_engine.predict_point_cloud(
         xyz_array=xyz_array,
         rgb_array=rgb_array,
-        batch_size=config['batch_size']
+        batch_size=inference_engine.config.get('batch_size', 1024)
     )
 
     # =========================
     # Save Results
     # =========================
     inference_engine.save_predictions_to_las(
-        input_las_path=config['input_las'],
-        output_las_path=config['output_las'],
+        input_las_path=input_las,
+        output_las_path=output_las,
         predictions=predictions,
-        probabilities=probabilities
+        probabilities=probabilities,
+        data_ckpt=data_ckpt
     )
 
-    print("\n" + "="*50)
-    print("Inference Complete!")
-    print(f"Predictions saved to: {config['output_las']}")
-    print("="*50)
+    print("\n" + "="*70)
+    print("INFERENCE COMPLETE!")
+    print("="*70)
+    print(f"✅ Predictions saved to: {output_las}")
+    print("="*70)
 
 
 if __name__ == '__main__':
     main()
+

@@ -254,7 +254,14 @@ class Trainer:
                   f"Precision: {test_precision:.4f} | Recall: {test_recall:.4f} | F1: {f1:.4f}")
 
             # Print per-class metrics for both train and test
-            class_names = ['Background', 'No-Joint', 'Joint']
+            # Get class names based on num_classes
+            num_classes = self.config['num_classes']
+            if num_classes == 2:
+                class_names = ['No-Joint', 'Joint']
+            elif num_classes == 3:
+                class_names = ['Background', 'No-Joint', 'Joint']
+            else:
+                class_names = [f'Class {i}' for i in range(num_classes)]
 
             # Training set per-class metrics
             print(f"\n{'='*70}")
