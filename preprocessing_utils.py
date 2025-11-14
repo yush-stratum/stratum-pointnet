@@ -158,9 +158,13 @@ def create_train_test_split(xyz_array, point_a, point_b, visualize=False, max_po
     full_ap = xyz_array[:, :2] - point_a[:2]
     full_cross_product = full_ap[:, 0] * full_ab[1] - full_ap[:, 1] * full_ab[0]
 
-    print(f"Train is right of the line from {point_a} to {point_b}")
-    full_train_mask = full_cross_product <= 0
-    full_test_mask = full_cross_product > 0
+    # print(f"Train is right of the line from {point_a} to {point_b}")
+    # full_train_mask = full_cross_product <= 0
+    # full_test_mask = full_cross_product > 0
+
+    print(f"Train is left of the line from {point_a} to {point_b}")
+    full_train_mask = full_cross_product > 0
+    full_test_mask = full_cross_product <= 0
 
     print(f"Train mask sum: {full_train_mask.sum()}")
     print(f"Test mask sum: {full_test_mask.sum()}")
@@ -334,7 +338,6 @@ def prepare_data_for_training(las_file, no_joints_dxf, joints_dxf,
 
     # Label points
     print(f"\nLabeling points within polygons...")
-    print(f"  -1: Unlabeled (default)")
     print(f"   0: No Joints")
     print(f"   1: Joints")
 

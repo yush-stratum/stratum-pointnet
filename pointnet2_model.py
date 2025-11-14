@@ -194,6 +194,105 @@ class PointNetSetAbstraction(nn.Module):
             new_points = grouped_xyz
         return new_xyz, new_points
 
+class PointNetSetAbstractionMsg(nn.Module):
+    """
+    Multi-Scale Grouping (MSG) Set Abstraction Layer
+
+    Applies multiple scales of grouping and feature extraction in parallel,
+    then concatenates the results for robust multi-scale feature learning.
+    """
+    def __init__(self, npoint, radius_list, nsample_list, in_channel, mlp_list):
+        """
+        Args:
+            npoint: Number of points to sample (centroids)
+            radius_list: List of radii for ball query at different scales
+            nsample_list: List of max samples per ball query at different scales
+            in_channel: Input channel dimension (3 for XYZ, or 3+D for XYZ+features)
+            mlp_list: List of MLP layer configs for each scale
+                     e.g., [[32, 32, 64], [64, 64, 128]] for 2 scales
+        """
+        super(PointNetSetAbstractionMsg, self).__init__()
+        self.npoint = npoint
+        self.radius_list = radius_list
+        self.nsample_list = nsample_list
+
+        # Create separate conv blocks for each scale
+        self.conv_blocks = nn.ModuleList()
+        self.bn_blocks = nn.ModuleList()
+
+        for i in range(len(mlp_list)):
+            convs = nn.ModuleList()
+            bns = nn.ModuleList()
+            last_channel = in_channel + 3  # +3 for relative coordinates
+
+            for out_channel in mlp_list[i]:
+                convs.append(nn.Conv2d(last_channel, out_channel, 1))
+                bns.append(nn.BatchNorm2d(out_channel))
+                last_channel = out_channel
+
+            self.conv_blocks.append(convs)
+            self.bn_blocks.append(bns)
+
+    def forward(self, xyz, points):
+        """
+        Input:
+            xyz: input points position data, [B, C, N]
+            points: input points data, [B, D, N]
+        Return:
+            new_xyz: sampled points position data, [B, C, S]
+            new_points_concat: concatenated multi-scale features, [B, D', S]
+        """
+        xyz = xyz.permute(0, 2, 1)  # [B, N, C]
+        if points is not None:
+            points = points.permute(0, 2, 1)  # [B, N, D]
+
+        B, N, C = xyz.shape
+        S = self.npoint
+
+        # Sample centroids using FPS
+        fps_idx = farthest_point_sample(xyz, S)  # [B, S]
+        new_xyz = index_points(xyz, fps_idx)  # [B, S, C]
+
+        new_points_list = []
+
+        # Process each scale
+        for i, radius in enumerate(self.radius_list):
+            K = self.nsample_list[i]
+
+            # Ball query to group neighbors
+            group_idx = query_ball_point(radius, K, xyz, new_xyz)  # [B, S, K]
+            grouped_xyz = index_points(xyz, group_idx)  # [B, S, K, C]
+
+            # Compute relative coordinates (centered at centroid)
+            grouped_xyz_norm = grouped_xyz - new_xyz.view(B, S, 1, C)  # [B, S, K, C]
+
+            # Concatenate relative coords with point features (if any)
+            if points is not None:
+                grouped_points = index_points(points, group_idx)  # [B, S, K, D]
+                grouped_points = torch.cat([grouped_xyz_norm, grouped_points], dim=-1)  # [B, S, K, C+D]
+            else:
+                grouped_points = grouped_xyz_norm  # [B, S, K, C]
+
+            # Permute for conv layers: [B, C+D, K, S]
+            grouped_points = grouped_points.permute(0, 3, 2, 1)
+
+            # Apply MLP for this scale
+            for j in range(len(self.conv_blocks[i])):
+                conv = self.conv_blocks[i][j]
+                bn = self.bn_blocks[i][j]
+                grouped_points = F.relu(bn(conv(grouped_points)))
+
+            # Max pooling over neighbors: [B, D', S]
+            new_points = torch.max(grouped_points, 2)[0]
+            new_points_list.append(new_points)
+
+        # Permute new_xyz back: [B, C, S]
+        new_xyz = new_xyz.permute(0, 2, 1)
+
+        # Concatenate features from all scales: [B, sum(D'_i), S]
+        new_points_concat = torch.cat(new_points_list, dim=1)
+
+        return new_xyz, new_points_concat
 
 class PointNetFeaturePropagation(nn.Module):
     """
@@ -312,35 +411,32 @@ class PointNet2Segmentation(nn.Module):
       super().__init__()
       self.input_channels = input_channels
 
-      # Set Abstraction layers - ADJUSTED FOR 1024 POINTS
-      # First layer: in_channel = 3 (normalized XYZ) + (input_channels - 3) additional features
-      # If input_channels=3, then in_channel=3 (just XYZ)
-      # If input_channels=6, then in_channel=3+3=6 (XYZ + RGB)
-      # If input_channels=7, then in_channel=3+4=7 (XYZ + 4 features)
-      self.sa1 = PointNetSetAbstraction(
-          npoint=512, radius=0.1, nsample=32,
-          in_channel=input_channels, mlp=[32, 32, 64], group_all=False
-      )
-      self.sa2 = PointNetSetAbstraction(
-          npoint=128, radius=0.2, nsample=64,  # 512 -> 128, nsample=32
-          in_channel=64 + 3, mlp=[64, 64, 128], group_all=False
-      )
-      self.sa3 = PointNetSetAbstraction(
-          npoint=64, radius=0.5, nsample=32,  # 128 -> 32, nsample=32
-          in_channel=128 + 3, mlp=[128, 128, 256], group_all=False
-      )
-      self.sa4 = PointNetSetAbstraction(
-          npoint=32, radius=1, nsample=16,  # 32 -> 8, nsample=16 (can't query 256 from 32!)
-          in_channel=256 + 3, mlp=[256, 256, 512], group_all=False
-      )
+      # self.sa1 = PointNetSetAbstraction(
+      #     npoint=512, radius=0.1, nsample=32,
+      #     in_channel=input_channels, mlp=[32, 32, 64], group_all=False
+      # )
+      # self.sa2 = PointNetSetAbstraction(
+      #     npoint=128, radius=0.2, nsample=64,  # 512 -> 128, nsample=32
+      #     in_channel=64 + 3, mlp=[64, 64, 128], group_all=False
+      # )
+      # self.sa3 = PointNetSetAbstraction(
+      #     npoint=64, radius=0.5, nsample=32,  # 128 -> 32, nsample=32
+      #     in_channel=128 + 3, mlp=[128, 128, 256], group_all=False
+      # )
+      # self.sa4 = PointNetSetAbstraction(
+      #     npoint=32, radius=1, nsample=16,  # 32 -> 8, nsample=16 (can't query 256 from 32!)
+      #     in_channel=256 + 3, mlp=[256, 256, 512], group_all=False
+      # )
 
-      # Feature Propagation layers (no changes needed)
-      self.fp4 = PointNetFeaturePropagation(in_channel=768, mlp=[256, 256])
-      self.fp3 = PointNetFeaturePropagation(in_channel=384, mlp=[256, 256])
-      self.fp2 = PointNetFeaturePropagation(in_channel=320, mlp=[256, 128])
-      # print(f"DEBUG INPUT CHANNELS: {input_channels}")
-      self.fp1 = PointNetFeaturePropagation(in_channel=128,
-      mlp=[128, 128, 128])
+      self.sa1 = PointNetSetAbstractionMsg(1024, [0.08, 0.1], [16, 32], 6, [[16, 16, 32], [32, 32, 64]])
+      self.sa2 = PointNetSetAbstractionMsg(256, [0.1, 0.2], [16, 32], 32+64, [[64, 64, 128], [64, 96, 128]])
+      self.sa3 = PointNetSetAbstractionMsg(64, [0.2, 0.4], [16, 32], 128+128, [[128, 196, 256], [128, 196, 256]])
+      self.sa4 = PointNetSetAbstractionMsg(16, [0.4, 0.8], [16, 32], 256+256, [[256, 256, 512], [256, 384, 512]])
+
+      self.fp4 = PointNetFeaturePropagation(512+512+256+256, [256, 256])
+      self.fp3 = PointNetFeaturePropagation(128+128+256, [256, 256])
+      self.fp2 = PointNetFeaturePropagation(32+64+256, [256, 128])
+      self.fp1 = PointNetFeaturePropagation(128, [128, 128, 128])
       # print("DEBUG INPUT CHANNELS:",self.fp1)
 
       # Segmentation head (no changes needed)

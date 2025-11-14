@@ -180,29 +180,41 @@ def main():
     # Configuration
     # =========================
     config = {
-        'run_name': 'test_run_knn_binary_normals_smote',
+        'run_name': 'test_run_knn_local_pointnet2msg',
 
         # ===== CLASSIFICATION MODE =====
         # Options: 'binary' or 'multiclass'
-        # - 'binary': Only Joints (class 1) vs No-Joints (class 0). Unlabeled points ignored.
-        # - 'multiclass': Background (class 0), No-Joints (class 1), Joints (class 2). Unlabeled points become Background.
-        'classification_mode': 'binary',  # Change to 'binary' for 2-class classification
+        # - 'binary': 2 classes - No-Joints (0) vs Joints (1). Unlabeled (-1) excluded.
+        # - 'multiclass': N classes - explicitly specify which labels to include
+        'classification_mode': 'binary',
+
+        # ===== MULTICLASS CONFIGURATION (only used if classification_mode='multiclass') =====
+        # Explicitly specify which label values from preprocessed data to use as classes
+        # Example: [0, 1, 2] = use labels 0, 1, 2 as model classes 0, 1, 2
+        # Any points with labels NOT in this list will be EXCLUDED from training
+        # WARNING: Do NOT include -1 (unlabeled) unless you explicitly want unlabeled as a class
+
+        # 'class_labels': [0, 1, 2],  # Which preprocessed labels to use
+
+        # # Optional: Human-readable names for display (must match length of class_labels)
+
+        # 'class_names': ['No-Joint', 'Joint-Type-A', 'Joint-Type-B'],
 
         # ===== DATA PATHS =====
-        'las_file': '/home/yush/local_backup_geotech/geotech_pointnet/data/w_E_p1_6cm_all.las',
-        'no_joints_dxf': '/home/yush/local_backup_geotech/geotech_cv/notebooks/dxfs/29 sept/no_joints_3_oct.dxf',
-        'joints_dxf': '/home/yush/local_backup_geotech/geotech_cv/notebooks/dxfs/29 sept/polygon joints 29 sept.dxf',
+        'las_file': '/home/yush/local_backup_geotech/dbox_pcls/nov_13_relabelling/point_clouds/East/Wall_E_part_1_transl_8_cm.las',
+        'no_joints_dxf': '/home/yush/local_backup_geotech/dbox_pcls/nov_13_relabelling/NJ_part_1_13_nov.dxf',
+        'joints_dxf': '/home/yush/local_backup_geotech/dbox_pcls/nov_13_relabelling/converted_discontinuities_13_nov.dxf',
         # 'rgb_array': '/home/yush/local_backup_geotech/geotech_pointnet/data/rgb_array.npy',
-        'rgb_array':None,
-        'data_dir': './data/multi_bench_test/',
+        'rgb_array':'/home/yush/local_backup_geotech/geotech_pointnet/data/wall_e_p1_rgb_normalized.npy',
+        'data_dir': './data/single_bench_local/',
 
         # ===== TRAIN/TEST SPLIT =====
         # Define the line that separates train/test regions
-        # 'split_point_a': [464275, 9175697, 2546],
-        # 'split_point_b': [464294, 9175699, 2552],
+        'split_point_a': [64174, 75534, 2569],
+        'split_point_b': [64154, 75534, 2548],
 
-        'split_point_a':  [464293.65 , 9175861.23 , 2565.35 ],
-        'split_point_b':  [464232.35 , 9175853.74 , 2516.821 ],
+        # 'split_point_a':  [464293.65 , 9175861.23 , 2565.35 ],
+        # 'split_point_b':  [464232.35 , 9175853.74 , 2516.821 ],
 
         # ===== DATASET CONFIGURATION =====
         'dataset': {
@@ -211,13 +223,13 @@ def main():
                 'k_neighbors': 256,
                 'normalize_mode': 'center',
                 'augment_train': False,
-                'train_stride': 10,  # Use every 10th point for initial sampling
-                'test_stride': 10,    # Use every 3rd test point
+                'train_stride': 3,  # Use every 10th point for initial sampling
+                'test_stride': 1,    # Use every 3rd test point
                 'min_labeled_ratio': 0.0,
-                'cache_dir': './data/knn_cache/big_test',
-                'feature_names': ['normals', 'curvature'],
+                'cache_dir': './data/knn_cache/local_single_bench',
+                'feature_names': ['normals'], #norm
                 'feature_k_neighbors': 30,
-                'feature_cache_dir': './data/feature_cache/big_test',
+                'feature_cache_dir': './data/feature_cache/local_single_bench',
 
                 # Label sampling for class balancing (limits samples per class)
                 # None = no limit, int = same limit for all classes
@@ -231,9 +243,9 @@ def main():
         },
 
         # ===== MODEL PARAMETERS =====
-        'use_rgb': False,      # Whether to use RGB features
-        'input_channels': 6,  # Will be calculated automatically based on features
-        'num_classes': 2,  # Will be set automatically based on classification_mode (2 for binary, 3 for multiclass)
+        'use_rgb': True,      # Whether to use RGB features
+        # 'input_channels': 6,  # Will be calculated automatically based on features
+        # 'num_classes': 2,  # Will be set automatically based on classification_mode (2 for binary, 3 for multiclass)
 
         # ===== DATA PARAMETERS (Backward compatibility) =====
         'patch_size': 1024,
@@ -244,13 +256,13 @@ def main():
         # Set total_train_samples to enable SMOTE augmentation
         # None = no SMOTE, use original data
         # int = target number of total training samples after SMOTE
-        'sampling_strategy': {0: 700000, 1:500000},  # e.g., 500000 to upsample to 500k samples
+        'sampling_strategy': {0: 700000, 1:700000}, #{0: 700000, 1:500000},  # e.g., 500000 to upsample to 500k samples
         'smote_k_neighbors': 10,  # Number of neighbors for SMOTE interpolation
 
         # ===== TRAINING PARAMETERS =====
-        'batch_size': 512,
+        'batch_size': 256,
         'num_epochs': 50,
-        'learning_rate': 0.001,
+        'learning_rate': 0.00001,
         'weight_decay': 1e-4,
         'lr_decay_step': 20,
         'lr_decay_rate': 0.7,
@@ -259,7 +271,7 @@ def main():
         # Binary mode: [w0, w1] for [No-Joint, Joint]
         # Multiclass mode: [w0, w1, w2] for [Background, No-Joint, Joint]
         # Set to None for no weighting
-        'class_weights': None,  # Example for multiclass: [Background, No-Joint, Joint]
+        'class_weights': [1,2],  # Example for multiclass: [Background, No-Joint, Joint]
 
         # ===== SAVING =====
         'save_dir': './checkpoints',
@@ -272,26 +284,62 @@ def main():
     # =========================
     # Validate and Set Classification Mode
     # =========================
-    classification_mode = config.get('classification_mode', 'multiclass')
+    classification_mode = config.get('classification_mode', 'binary')
     if classification_mode not in ['binary', 'multiclass']:
         raise ValueError(f"classification_mode must be 'binary' or 'multiclass', got '{classification_mode}'")
 
-    # Set num_classes based on mode (override any manual setting)
+    # Validate and configure based on mode
     if classification_mode == 'binary':
-        config['num_classes'] = 2  # No-Joint (0), Joint (1)
+        config['num_classes'] = 2
+        config['class_labels'] = [0, 1]  # Binary always uses 0 and 1
+        if 'class_names' not in config or config['class_names'] is None:
+            config['class_names'] = ['No-Joint', 'Joint']
+
         print(f"\n{'='*70}")
         print(f"CLASSIFICATION MODE: BINARY (2 classes)")
-        print(f"  Class 0: No-Joint")
-        print(f"  Class 1: Joint")
-        print(f"  Note: Unlabeled points (label=-1) will be excluded from training")
+        print(f"  Class 0: {config['class_names'][0]}")
+        print(f"  Class 1: {config['class_names'][1]}")
+        print(f"  Note: Unlabeled points (label=-1) will be excluded")
         print(f"{'='*70}\n")
+
     else:  # multiclass
-        config['num_classes'] = 3  # Background (0), No-Joint (1), Joint (2)
+        # Validate class_labels is provided
+        if 'class_labels' not in config or config['class_labels'] is None:
+            raise ValueError("For multiclass mode, you must specify 'class_labels' in config")
+
+        class_labels = config['class_labels']
+        if not isinstance(class_labels, list) or len(class_labels) < 2:
+            raise ValueError(f"class_labels must be a list with at least 2 labels, got: {class_labels}")
+
+        # Check for -1 in class_labels (dangerous!)
+        if -1 in class_labels:
+            raise ValueError(
+                "DANGER: class_labels contains -1 (unlabeled points)!\n"
+                "Including unlabeled points as a class causes label poisoning.\n"
+                "Remove -1 from class_labels or fix your preprocessing to assign explicit labels."
+            )
+
+        config['num_classes'] = len(class_labels)
+
+        # Validate class_names if provided
+        if 'class_names' in config and config['class_names'] is not None:
+            if len(config['class_names']) != len(class_labels):
+                raise ValueError(
+                    f"class_names length ({len(config['class_names'])}) must match "
+                    f"class_labels length ({len(class_labels)})"
+                )
+        else:
+            # Default names
+            config['class_names'] = [f'Class-{label}' for label in class_labels]
+
         print(f"\n{'='*70}")
-        print(f"CLASSIFICATION MODE: MULTICLASS (3 classes)")
-        print(f"  Class 0: Background (unlabeled points)")
-        print(f"  Class 1: No-Joint")
-        print(f"  Class 2: Joint")
+        print(f"CLASSIFICATION MODE: MULTICLASS ({config['num_classes']} classes)")
+        print(f"  Using labels from preprocessed data: {class_labels}")
+        print(f"  Class mapping:")
+        for model_class, data_label in enumerate(class_labels):
+            class_name = config['class_names'][model_class]
+            print(f"    Model class {model_class} = Data label {data_label} ({class_name})")
+        print(f"  Note: Points with labels NOT in {class_labels} will be excluded")
         print(f"{'='*70}\n")
 
     data_dir = config['data_dir']
@@ -459,32 +507,71 @@ def main():
         print(f"\nDataset type '{dataset_type}' does not require polygon dictionaries")
 
     # =========================
-    # Handle Label Remapping for Multi-Class Classification
+    # Filter and Remap Labels Based on class_labels
     # =========================
-    # NOTE: Binary mode filtering happens in DatasetFactory._create_knn_datasets()
-    # to ensure KDTree is built only on labeled points
+    print("\n" + "="*70)
+    print("LABEL FILTERING AND REMAPPING")
+    print("="*70)
 
-    if classification_mode == 'multiclass':
-        print("\n" + "="*70)
-        print("MULTICLASS MODE: Converting unlabeled points to Background")
-        print("="*70)
-        print("Original labels: -1 (unlabeled), 0 (no-joint), 1 (joint)")
-        print("New labels: 0 (background), 1 (no-joint), 2 (joint)")
+    class_labels = config['class_labels']
+    class_names = config['class_names']
 
-        # Remap: -1 → 0 (background), 0 → 1 (no-joint), 1 → 2 (joint)
-        original_label_counts = np.bincount(label_array[label_array >= 0])
-        unlabeled_count = np.sum(label_array == -1)
+    # Show what labels exist in the loaded data
+    unique_labels_in_data = np.unique(label_array)
+    print(f"\nLabels found in preprocessed data: {unique_labels_in_data}")
+    print(f"Requested class_labels from config: {class_labels}")
 
-        # Shift all labels by +1 (this makes -1→0, 0→1, 1→2)
-        label_array = label_array + 1
+    # Validate that all requested labels exist in the data
+    missing_labels = [label for label in class_labels if label not in unique_labels_in_data]
+    if missing_labels:
+        raise ValueError(
+            f"ERROR: Requested class_labels {missing_labels} not found in preprocessed data!\n"
+            f"Available labels in data: {unique_labels_in_data}\n"
+            f"Please check your preprocessing or update class_labels in config."
+        )
 
-        print(f"\nLabel counts after remapping:")
-        print(f"  Background (class 0): {unlabeled_count:,} points (was unlabeled)")
-        if len(original_label_counts) > 0:
-            print(f"  No-Joint (class 1): {original_label_counts[0]:,} points (was class 0)")
-        if len(original_label_counts) > 1:
-            print(f"  Joint (class 2): {original_label_counts[1]:,} points (was class 1)")
-        print("="*70 + "\n")
+    # Create mask for points that have one of the desired labels
+    valid_label_mask = np.isin(label_array, class_labels)
+
+    print(f"\nFiltering to include only labels {class_labels}:")
+    print(f"  Total points in data: {len(label_array):,}")
+    print(f"  Points with valid labels: {np.sum(valid_label_mask):,}")
+    print(f"  Points excluded: {np.sum(~valid_label_mask):,}")
+
+    # Update masks to only include points with valid labels
+    train_mask = train_mask & valid_label_mask
+    test_mask = test_mask & valid_label_mask
+
+    print(f"\nAfter filtering:")
+    print(f"  Train points: {np.sum(train_mask):,}")
+    print(f"  Test points: {np.sum(test_mask):,}")
+
+    # Remap labels to consecutive integers starting from 0
+    # Example: class_labels=[0, 1, 2] → no remapping needed
+    # Example: class_labels=[1, 3, 5] → remap to [0, 1, 2]
+    print(f"\nRemapping labels to model classes:")
+    label_array_remapped = np.full_like(label_array, -999)  # Sentinel value
+
+    for model_class, data_label in enumerate(class_labels):
+        mask = label_array == data_label
+        label_array_remapped[mask] = model_class
+        count = np.sum(mask)
+        print(f"  Data label {data_label} ({class_names[model_class]}) → Model class {model_class} ({count:,} points)")
+
+    # Verify no unmapped points remain in train/test
+    unmapped_in_train = np.sum(label_array_remapped[train_mask] == -999)
+    unmapped_in_test = np.sum(label_array_remapped[test_mask] == -999)
+    if unmapped_in_train > 0 or unmapped_in_test > 0:
+        raise RuntimeError(
+            f"BUG: Found unmapped points after remapping!\n"
+            f"  Unmapped in train: {unmapped_in_train}\n"
+            f"  Unmapped in test: {unmapped_in_test}"
+        )
+
+    label_array = label_array_remapped
+    print(f"\n✅ Label filtering and remapping complete")
+    print(f"   Final label range: {np.unique(label_array[train_mask | test_mask])}")
+    print("="*70 + "\n")
 
     # =========================
     # Step 2: Create Datasets
@@ -767,6 +854,12 @@ def main():
         num_classes=config['num_classes'],
         input_channels=actual_input_channels
     )
+
+    # from models_cnn import SimplePointCNNSegmentation
+    # model = SimplePointCNNSegmentation(
+    #     num_classes=config['num_classes'],
+    #     input_channels=actual_input_channels
+    # )
 
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())

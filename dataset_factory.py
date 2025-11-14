@@ -203,23 +203,8 @@ class DatasetFactory:
         feature_cache_dir = dataset_params.get('feature_cache_dir', './data/feature_cache')
         feature_cache_key = dataset_params.get('feature_cache_key', None)
 
-        # CRITICAL: For binary mode, filter to only labeled points BEFORE passing to dataset
-        # This ensures KDTree is built only on labeled points
-        classification_mode = config.get('classification_mode', 'multiclass')
-        if classification_mode == 'binary':
-            print("\n" + "="*70)
-            print("DATASET FACTORY: Binary mode - filtering to labeled points only")
-            print("="*70)
-            # Train set: only use labeled points within train region
-            train_labeled = train_mask & (label_array >= 0)
-            test_labeled = test_mask & (label_array >= 0)
-
-            print(f"  Train: {np.sum(train_mask):,} → {np.sum(train_labeled):,} (removed {np.sum(train_mask) - np.sum(train_labeled):,} unlabeled)")
-            print(f"  Test: {np.sum(test_mask):,} → {np.sum(test_labeled):,} (removed {np.sum(test_mask) - np.sum(test_labeled):,} unlabeled)")
-            print("="*70 + "\n")
-
-            train_mask = train_labeled
-            test_mask = test_labeled
+        # NOTE: Label filtering now happens in train_end2end.py before calling this function
+        # Both binary and multiclass modes filter based on config['class_labels']
 
         return create_train_test_knn_datasets(
             xyz_array=xyz_array,
