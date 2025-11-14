@@ -203,7 +203,7 @@ def main():
         # ===== DATA PATHS =====
         'las_file': '/home/yush/local_backup_geotech/dbox_pcls/nov_13_relabelling/point_clouds/East/Wall_E_part_1_transl_8_cm.las',
         'no_joints_dxf': '/home/yush/local_backup_geotech/dbox_pcls/nov_13_relabelling/NJ_part_1_13_nov.dxf',
-        'joints_dxf': '/home/yush/local_backup_geotech/dbox_pcls/nov_13_relabelling/converted_discontinuities_13_nov.dxf',
+        'joints_dxf': '/home/yush/local_backup_geotech/dbox_pcls/nov_13_relabelling/converted_discontinuities_14_nov.dxf',
         # 'rgb_array': '/home/yush/local_backup_geotech/geotech_pointnet/data/rgb_array.npy',
         'rgb_array':'/home/yush/local_backup_geotech/geotech_pointnet/data/wall_e_p1_rgb_normalized.npy',
         'data_dir': './data/single_bench_local/',
@@ -223,7 +223,7 @@ def main():
                 'k_neighbors': 256,
                 'normalize_mode': 'center',
                 'augment_train': False,
-                'train_stride': 3,  # Use every 10th point for initial sampling
+                'train_stride': 1,  # Use every 10th point for initial sampling
                 'test_stride': 1,    # Use every 3rd test point
                 'min_labeled_ratio': 0.0,
                 'cache_dir': './data/knn_cache/local_single_bench',
@@ -850,16 +850,16 @@ def main():
     # Override config with calculated value
     config['input_channels'] = actual_input_channels
 
-    model = PointNet2Segmentation(
-        num_classes=config['num_classes'],
-        input_channels=actual_input_channels
-    )
-
-    # from models_cnn import SimplePointCNNSegmentation
-    # model = SimplePointCNNSegmentation(
+    # model = PointNet2Segmentation(
     #     num_classes=config['num_classes'],
     #     input_channels=actual_input_channels
     # )
+
+    from models_cnn import SimplePointCNNSegmentation,TinyPointNetSegmentation
+    model = TinyPointNetSegmentation(
+        num_classes=config['num_classes'],
+        input_channels=actual_input_channels
+    )
 
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
